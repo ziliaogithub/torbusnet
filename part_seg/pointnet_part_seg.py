@@ -47,7 +47,7 @@ def get_transform(point_cloud, is_training, bn_decay=None, K = 3):
     batch_size = point_cloud.get_shape()[0].value
     num_point = point_cloud.get_shape()[1].value
 
-    input_image = tf.expand_dims(point_cloud, -1)
+    input_image = tf.expand_dims(point_cloud, -1) # BxNx3 -> BxNx3x1
     net = tf_util.conv2d(input_image, 64, [1,3], padding='VALID', stride=[1,1],
                          bn=True, is_training=is_training, scope='tconv1', bn_decay=bn_decay)
     net = tf_util.conv2d(net, 128, [1,1], padding='VALID', stride=[1,1],
