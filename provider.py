@@ -16,7 +16,6 @@ if not os.path.exists(os.path.join(DATA_DIR, 'modelnet40_ply_hdf5_2048')):
     os.system('mv %s %s' % (zipfile[:-4], DATA_DIR))
     os.system('rm %s' % (zipfile))
 
-
 def shuffle_data(data, labels):
     """ Shuffle data and labels.
         Input:

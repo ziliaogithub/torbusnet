@@ -22,7 +22,7 @@ parser.add_argument('--output_dir', type=str, default='train_results', help='Dir
 parser.add_argument('--wd', type=float, default=0, help='Weight Decay [Default: 0.0]')
 FLAGS = parser.parse_args()
 
-hdf5_data_dir = os.path.join(BASE_DIR, './hdf5_data')
+hdf5_data_dir = os.path.join(BASE_DIR, '../../kitti/')
 
 # MAIN SCRIPT
 point_num = FLAGS.point_num
@@ -32,20 +32,21 @@ output_dir = FLAGS.output_dir
 if not os.path.exists(output_dir):
     os.mkdir(output_dir)
 
-color_map_file = os.path.join(hdf5_data_dir, 'part_color_mapping.json')
-color_map = json.load(open(color_map_file, 'r'))
+#color_map_file = os.path.join(hdf5_data_dir, 'part_color_mapping.json')
+#color_map = json.load(open(color_map_file, 'r'))
 
-all_obj_cats_file = os.path.join(hdf5_data_dir, 'all_object_categories.txt')
-fin = open(all_obj_cats_file, 'r')
-lines = [line.rstrip() for line in fin.readlines()]
-all_obj_cats = [(line.split()[0], line.split()[1]) for line in lines]
-fin.close()
+#all_obj_cats_file = os.path.join(hdf5_data_dir, 'all_object_categories.txt')
+#fin = open(all_obj_cats_file, 'r')
+#lines = [line.rstrip() for line in fin.readlines()]
+#all_obj_cats = [(line.split()[0], line.split()[1]) for line in lines]
+all_obj_cats = [['background', 0], ['something', 1]]
+#fin.close()
 
-all_cats = json.load(open(os.path.join(hdf5_data_dir, 'overallid_to_catid_partid.json'), 'r'))
-NUM_CATEGORIES = 16
-NUM_PART_CATS = len(all_cats)
-print("NUM_PART_CATS",NUM_PART_CATS)
-print("all_cats",all_cats)
+#all_cats = json.load(open(os.path.join(hdf5_data_dir, 'overallid_to_catid_partid.json'), 'r'))
+NUM_CATEGORIES = 2
+NUM_PART_CATS = 2 #len(all_cats)
+#print("NUM_PART_CATS",NUM_PART_CATS)
+#print("all_cats",all_cats)
 
 print('#### Batch Size: ', batch_size)
 print('#### Point Number: ', point_num)
@@ -66,8 +67,8 @@ MOMENTUM = 0.9
 TRAINING_EPOCHES = FLAGS.epoch
 print('### Training epoch: ', TRAINING_EPOCHES)
 
-TRAINING_FILE_LIST = os.path.join(hdf5_data_dir, 'train_hdf5_file_list.txt')
-TESTING_FILE_LIST = os.path.join(hdf5_data_dir, 'val_hdf5_file_list.txt')
+TRAINING_FILE_LIST = os.path.join(hdf5_data_dir, 'train_tracklets.txt')
+TESTING_FILE_LIST = os.path.join(hdf5_data_dir, 'validate_tracklets.txt')
 
 MODEL_STORAGE_PATH = os.path.join(output_dir, 'trained_models')
 if not os.path.exists(MODEL_STORAGE_PATH):
@@ -189,6 +190,7 @@ def train():
         test_writer = tf.summary.FileWriter(SUMMARIES_FOLDER + '/test')
 
         train_file_list = provider.getDataFiles(TRAINING_FILE_LIST)
+        print("train_file_list", train_file_list)
         num_train_file = len(train_file_list)
         test_file_list = provider.getDataFiles(TESTING_FILE_LIST)
         num_test_file = len(test_file_list)
@@ -324,6 +326,17 @@ def train():
                             feed_dict=feed_dict)
 
                     per_instance_part_acc = np.mean(pred_seg_res == cur_seg[begidx: endidx, ...], axis=1)
+                    # cur_test_filename
+                    # cur_data[begidx: endidx, ...] -> points (BxNx3)
+                    # cur_seg[begidx: endidx, ...]  -> Labels (BxN)
+                    # pred_seg_res                  -> (BxN)
+                    provider.generate_top_views(
+                        cur_data[begidx: endidx, ...], 
+                        cur_seg[begidx: endidx, ...], 
+                        pred_seg_res, 
+                        cur_test_filename,
+                        MODEL_STORAGE_PATH,
+                        begidx)
                     average_part_acc = np.mean(per_instance_part_acc)
 
                     total_seen += 1
