@@ -29,7 +29,6 @@ F_VIEW_FEATURES = (C_H, C_W, 3)
 
 class Parser(object):
 
-
     LIDAR_ANGLE = np.pi/6.
 
     def __init__(self, basedir, date, drive):

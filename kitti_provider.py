@@ -16,16 +16,27 @@ def parse_filename(filename):
     drive   = match.group(3)
     return (basedir, date, drive)
 
+total_a = 0
+total_b = 0
+
 def generate_top_views(
     cur_data, 
     cur_seg, 
     pred_seg_res, 
     cur_test_filename,
     MODEL_STORAGE_PATH,
-    begidx):
-
-    print("GT   Object points:", np.sum(cur_seg))
-    print("Pred Object points:", np.sum(pred_seg_res))
+    begidx,
+    num_parts):
+    global total_a, total_b
+    print("GT mean:", np.mean(cur_data[0,:,0]),np.mean(cur_data[0,:,1]),np.mean(cur_data[0,:,2]))
+    print("GT   Object points:", np.sum(cur_seg), "eg:", cur_seg[0][0:2048:256])
+    print(np.bincount(cur_seg[0], minlength=num_parts))
+    print("Pred Object points:", np.sum(pred_seg_res), pred_seg_res[0][0:2048:256])
+    print(np.bincount(pred_seg_res[0], minlength=num_parts))
+    hist_gt = np.bincount(cur_seg.flatten())
+    total_a += hist_gt[0]
+    total_b += hist_gt[1]
+    print(total_a, "/", total_b, total_a+total_b)
 
     X_RANGE = (  0., 70.)
     Y_RANGE = (-40., 40.)
@@ -80,6 +91,13 @@ def shuffle_data(data, labels):
     np.random.shuffle(idx)
     return data[idx, ...], labels[idx], idx
 
+def normalize(data):
+    return data
+    for (i,batch) in enumerate(data):
+        data[i,:,0] -= np.mean(batch[:,0])
+        data[i,:,1] -= np.mean(batch[:,1])
+        data[i,:,2] -= np.mean(batch[:,2])
+    return data
 
 def load_h5_data_label_seg(h5_filename):
 
@@ -91,12 +109,12 @@ def load_h5_data_label_seg(h5_filename):
         data  = h5f['data'][:]
         label = h5f['label'][:]
         seg   = h5f['seg'][:]
-        print(data.shape, label.shape, seg.shape)
         assert data.shape[1:3] == (MAX_POINTS,3)
         assert label.shape[1]  == 1
-        assert seg.shape[1]    == (MAX_POINTS,3)
+        assert seg.shape[1]    == MAX_POINTS
         assert data.shape[0]   == label.shape[0] == seg.shape[0]
-        return (data, label, seg)
+
+        return (normalize(data), label, seg)
 
     (basedir, date, drive) = parse_filename(h5_filename)
     print("Loading", basedir, date, drive)
@@ -136,8 +154,9 @@ def load_h5_data_label_seg(h5_filename):
 
     # data (B, points, 3)
     # label B, 1) uint8
-    # seg (B, points, 3) uint8
-    return (data, label, seg)
+    # seg (B, points) uint8
+    # e.g. (1870, 2048, 3) (1870, 1) (1870, 2048)
+    return (normalize(data), label, seg)
 
 def getDataFiles(list_filename):
     return [line.rstrip() for line in open(list_filename)]

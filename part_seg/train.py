@@ -6,10 +6,11 @@ from datetime import datetime
 import json
 import os
 import sys
+
+
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 sys.path.append(BASE_DIR)
 sys.path.append(os.path.dirname(BASE_DIR))
-import kitti_provider as provider
 import pointnet_part_seg as model
 
 # DEFAULT SETTINGS
@@ -20,9 +21,20 @@ parser.add_argument('--epoch', type=int, default=200, help='Epoch to run [defaul
 parser.add_argument('--point_num', type=int, default=2048, help='Point Number [256/512/1024/2048]')
 parser.add_argument('--output_dir', type=str, default='train_results', help='Directory that stores all training logs and trained models')
 parser.add_argument('--wd', type=float, default=0, help='Weight Decay [Default: 0.0]')
+parser.add_argument('--kitti', action='store_true', help='Use it for kitti seg')
 FLAGS = parser.parse_args()
 
-hdf5_data_dir = os.path.join(BASE_DIR, '../../kitti/')
+KITTI = FLAGS.kitti
+
+if KITTI:
+    import kitti_provider as provider
+else:
+    import provider as provider
+
+if KITTI:
+    hdf5_data_dir = os.path.join(BASE_DIR, '../../kitti/')
+else:
+    hdf5_data_dir = os.path.join(BASE_DIR, './hdf5_data')
 
 # MAIN SCRIPT
 point_num = FLAGS.point_num
@@ -32,21 +44,29 @@ output_dir = FLAGS.output_dir
 if not os.path.exists(output_dir):
     os.mkdir(output_dir)
 
-#color_map_file = os.path.join(hdf5_data_dir, 'part_color_mapping.json')
-#color_map = json.load(open(color_map_file, 'r'))
+if KITTI:
+    all_obj_cats = [['background', 0], ['something', 1]]
+else:
+    color_map_file = os.path.join(hdf5_data_dir, 'part_color_mapping.json')
+    color_map = json.load(open(color_map_file, 'r'))
+    all_obj_cats_file = os.path.join(hdf5_data_dir, 'all_object_categories.txt')
+    fin = open(all_obj_cats_file, 'r')
+    lines = [line.rstrip() for line in fin.readlines()]
+    all_obj_cats = [(line.split()[0], line.split()[1]) for line in lines]
+    fin.close()
+print(all_obj_cats)
 
-#all_obj_cats_file = os.path.join(hdf5_data_dir, 'all_object_categories.txt')
-#fin = open(all_obj_cats_file, 'r')
-#lines = [line.rstrip() for line in fin.readlines()]
-#all_obj_cats = [(line.split()[0], line.split()[1]) for line in lines]
-all_obj_cats = [['background', 0], ['something', 1]]
-#fin.close()
+if KITTI:
+    all_cats = [['cat0', 0]]
+    NUM_CATEGORIES = 1
+    NUM_PART_CATS = 2 #len(all_cats)
+else:
+    all_cats = json.load(open(os.path.join(hdf5_data_dir, 'overallid_to_catid_partid.json'), 'r'))
+    NUM_CATEGORIES = 16
+    NUM_PART_CATS = len(all_cats)
 
-#all_cats = json.load(open(os.path.join(hdf5_data_dir, 'overallid_to_catid_partid.json'), 'r'))
-NUM_CATEGORIES = 2
-NUM_PART_CATS = 2 #len(all_cats)
-#print("NUM_PART_CATS",NUM_PART_CATS)
-#print("all_cats",all_cats)
+print("NUM_PART_CATS",NUM_PART_CATS)
+print("all_cats",all_cats)
 
 print('#### Batch Size: ', batch_size)
 print('#### Point Number: ', point_num)
@@ -67,8 +87,12 @@ MOMENTUM = 0.9
 TRAINING_EPOCHES = FLAGS.epoch
 print('### Training epoch: ', TRAINING_EPOCHES)
 
-TRAINING_FILE_LIST = os.path.join(hdf5_data_dir, 'train_tracklets.txt')
-TESTING_FILE_LIST = os.path.join(hdf5_data_dir, 'validate_tracklets.txt')
+if KITTI:
+    TRAINING_FILE_LIST = os.path.join(hdf5_data_dir, 'train_tracklets.txt')
+    TESTING_FILE_LIST = os.path.join(hdf5_data_dir, 'validate_tracklets.txt')
+else:
+    TRAINING_FILE_LIST = os.path.join(hdf5_data_dir, 'train_hdf5_file_list.txt')
+    TESTING_FILE_LIST = os.path.join(hdf5_data_dir, 'val_hdf5_file_list.txt')
 
 MODEL_STORAGE_PATH = os.path.join(output_dir, 'trained_models')
 if not os.path.exists(MODEL_STORAGE_PATH):
@@ -135,7 +159,7 @@ def train():
             # In model.get_loss, we define the total loss to be weighted sum of the classification and segmentation losses.
             # Here, we only train for segmentation network. Thus, we set weight to be 1.0.
             loss, label_loss, per_instance_label_loss, seg_loss, per_instance_seg_loss, per_instance_seg_pred_res  \
-                = model.get_loss(labels_pred, seg_pred, labels_ph, seg_ph, 1.0, end_points)
+                = model.get_loss(labels_pred, seg_pred, labels_ph, seg_ph, 1.0, end_points, NUM_PART_CATS)
 
             total_training_loss_ph = tf.placeholder(tf.float32, shape=())
             total_testing_loss_ph = tf.placeholder(tf.float32, shape=())
@@ -330,13 +354,7 @@ def train():
                     # cur_data[begidx: endidx, ...] -> points (BxNx3)
                     # cur_seg[begidx: endidx, ...]  -> Labels (BxN)
                     # pred_seg_res                  -> (BxN)
-                    provider.generate_top_views(
-                        cur_data[begidx: endidx, ...], 
-                        cur_seg[begidx: endidx, ...], 
-                        pred_seg_res, 
-                        cur_test_filename,
-                        MODEL_STORAGE_PATH,
-                        begidx)
+                    
                     average_part_acc = np.mean(per_instance_part_acc)
 
                     total_seen += 1
@@ -347,6 +365,15 @@ def train():
                     per_instance_label_pred = np.argmax(label_pred_val, axis=1)
                     total_label_acc += np.mean(np.float32(per_instance_label_pred == cur_labels[begidx: endidx, ...]))
                     total_seg_acc += average_part_acc
+
+                    provider.generate_top_views(
+                        cur_data[begidx: endidx, ...], 
+                        cur_seg[begidx: endidx, ...], 
+                        pred_seg_res, 
+                        cur_test_filename,
+                        MODEL_STORAGE_PATH,\
+                        begidx,
+                        NUM_PART_CATS)
 
                     for shape_idx in range(begidx, endidx):
                         total_seen_per_cat[cur_labels[shape_idx]] += 1

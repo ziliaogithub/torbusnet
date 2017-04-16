@@ -16,6 +16,24 @@ if not os.path.exists(os.path.join(DATA_DIR, 'modelnet40_ply_hdf5_2048')):
     os.system('mv %s %s' % (zipfile[:-4], DATA_DIR))
     os.system('rm %s' % (zipfile))
 
+def generate_top_views(
+    cur_data, 
+    cur_seg, 
+    pred_seg_res, 
+    cur_test_filename,
+    MODEL_STORAGE_PATH,
+    begidx,
+    num_parts):
+    print("GT mean:", np.mean(cur_data[0,:,0]),np.mean(cur_data[0,:,1]),np.mean(cur_data[0,:,2]))
+    print("GT   Object points:", np.sum(cur_seg), "eg:", cur_seg[0][0:2048:256])
+    print(np.bincount(cur_seg[0], minlength=num_parts))
+    print("Pred Object points:", np.sum(pred_seg_res), pred_seg_res[0][0:2048:256])
+    print(np.bincount(pred_seg_res[0], minlength=num_parts))
+    #import code
+    #code.interact(local=locals())
+
+    return
+
 def shuffle_data(data, labels):
     """ Shuffle data and labels.
         Input:
@@ -100,8 +118,7 @@ def load_h5_data_label_seg(h5_filename):
     data = f['data'][:]
     label = f['label'][:]
     seg = f['pid'][:]
-    print(data.shape, label.shape, seg.shape)
-    print(data.dtype, label.dtype, seg.dtype)
+    print("Loading", h5_filename, data.shape, label.shape, seg.shape, data.dtype, label.dtype, seg.dtype)
 
     return (data, label, seg)
 
