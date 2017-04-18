@@ -84,7 +84,6 @@ def printout(flog, data):
 def placeholder_inputs():
     pointclouds_ph = tf.placeholder(tf.float32, shape=(batch_size, point_num, 3), name="pointclouds")
     input_label_ph = tf.placeholder(tf.float32, shape=(batch_size, NUM_CATEGORIES), name="input_label")
-    #label_ph = tf.placeholder(tf.int32, shape=(batch_size))
     bbox_A_ph = tf.placeholder(tf.float32, shape=(batch_size,2), name="bbox_A")
     bbox_B_ph = tf.placeholder(tf.float32, shape=(batch_size,2), name="bbox_B")
     bbox_l_ph = tf.placeholder(tf.float32, shape=(batch_size,1), name="bbox_l")
@@ -129,8 +128,7 @@ def train():
             bn_decay_op = tf.summary.scalar('bn_decay', bn_decay)
  
             bbox_A_pred, bbox_B_pred, bbox_l_pred, end_points = model.get_model(pointclouds_ph, input_label_ph, \
-                    is_training=is_training_ph, bn_decay=bn_decay, cat_num=NUM_CATEGORIES, \
-                    batch_size=batch_size, num_point=point_num, weight_decay=FLAGS.wd)
+                    is_training=is_training_ph, bn_decay=bn_decay, cat_num=NUM_CATEGORIES, batch_size=batch_size, num_point=point_num, weight_decay=FLAGS.wd)
 
             # model.py defines both classification net and segmentation net, which share the common global feature extractor network.
             # In model.get_loss, we define the total loss to be weighted sum of the classification and segmentation losses.
@@ -204,8 +202,9 @@ def train():
                 #cur_labels_one_hot = convert_label_to_one_hot(cur_labels)
                 print(cur_data.shape, cur_boxes.shape)
 
-                num_data = len(cur_labels)
-                num_batch = int(num_data / batch_size)
+                num_data = cur_data.shape[0]
+                # see http://stackoverflow.com/questions/14822184/is-there-a-ceiling-equivalent-of-operator-in-python
+                num_batch = int(-(-num_data // batch_size))
 
                 total_loss = 0.0
                 total_bbox_A_loss = 0.0
@@ -214,7 +213,7 @@ def train():
 
                 for j in range(num_batch):
                     begidx = j * batch_size
-                    endidx = (j + 1) * batch_size
+                    endidx = min((j + 1) * batch_size,num_data)
 
                     feed_dict = {
                             pointclouds_ph:     cur_data[begidx: endidx, ...], 
@@ -227,7 +226,9 @@ def train():
                     _, loss_val, bbox_A_loss_val, bbox_B_loss_val, bbox_l_loss_val, bbox_A_pred_val \
                             = sess.run([train_op, loss, bbox_A_loss, bbox_B_loss, bbox_l_loss, bbox_A_pred ], feed_dict = feed_dict)
 
-                    print(cur_boxes[begidx: endidx, ..., 0:2], bbox_A_pred_val)
+                    if (j == num_batch -1):
+                        bbox_A_pred_val2 = sess.run([bbox_A_pred ], feed_dict = feed_dict)
+                        print(cur_boxes[begidx: endidx, ..., 0:2], bbox_A_pred_val, bbox_A_pred_val2)
                     if epoch >= 20:
                         #import code
                         #code.interact(local=dict(globals(), **locals())) 
@@ -299,9 +300,10 @@ def train():
                 #cur_labels_one_hot = convert_label_to_one_hot(cur_labels)
                 print(cur_data.shape, cur_boxes.shape)
 
-                num_data = len(cur_labels)
-                num_batch = int(num_data / batch_size)
+                num_data = cur_data.shape[0]
+                num_batch = int(-(-num_data // batch_size))
 
+                print("items", num_data, "batches to do", num_batch)
                 total_loss = 0.0
                 total_bbox_A_loss = 0.0
                 total_bbox_B_loss = 0.0
@@ -310,7 +312,7 @@ def train():
 
                 for j in range(num_batch):
                     begidx = j * batch_size
-                    endidx = (j + 1) * batch_size
+                    endidx = min((j + 1) * batch_size, num_data)
                     feed_dict = {
                             pointclouds_ph:     cur_data[begidx: endidx, ...], 
                             bbox_A_ph:          cur_boxes[begidx: endidx, ..., 0:2],
@@ -324,10 +326,9 @@ def train():
                         #import code
                         #code.interact(local=locals())
                         pass
-                    bbox_A_pred_val = bbox_B_pred_val = bbox_l_pred_val = np.array([[0.,0.]])
-                    #bbox_A_pred_val, bbox_B_pred_val, bbox_l_pred_val, \
-                    loss_val, bbox_A_loss_val, bbox_B_loss_val, bbox_l_loss_val \
-                    = sess.run([loss, bbox_A_loss, bbox_B_loss, bbox_l_loss ], feed_dict = feed_dict)
+                    #bbox_A_pred_val = bbox_B_pred_val = bbox_l_pred_val = np.array([[0.,0.]])
+                    bbox_A_pred_val, bbox_B_pred_val, bbox_l_pred_val, loss_val, bbox_A_loss_val, bbox_B_loss_val, bbox_l_loss_val \
+                    = sess.run([bbox_A_pred, bbox_B_pred, bbox_l_pred, loss, bbox_A_loss, bbox_B_loss, bbox_l_loss ], feed_dict = feed_dict)
 
                     # cur_test_filename
                     # cur_data[begidx: endidx, ...] -> points (BxNx3)
@@ -400,7 +401,7 @@ def train():
             printout(flog, '\n>>> Training for the epoch %d/%d ...' % (epoch, TRAINING_EPOCHES))
 
             train_file_idx = np.arange(0, len(train_file_list))
-            #np.random.shuffle(train_file_idx)
+            np.random.shuffle(train_file_idx)
 
             train_one_epoch(train_file_idx, epoch)
 

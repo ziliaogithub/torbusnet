@@ -13,6 +13,7 @@ def get_transform_K(inputs, is_training, bn_decay=None, K = 3):
     """ Transform Net, input is BxNx1xK gray image
         Return:
             Transformation matrix of size KxK """
+    #batch_size = tf.shape(inputs)[0]
     batch_size = inputs.get_shape()[0].value
     num_point = inputs.get_shape()[1].value
 
@@ -42,7 +43,7 @@ def get_transform(point_cloud, is_training, bn_decay=None, K = 3):
     """ Transform Net, input is BxNx3 gray image
         Return:
             Transformation matrix of size 3xK """
-    batch_size = point_cloud.get_shape()[0].value
+    batch_size = tf.shape(point_cloud)[0]
     num_point = point_cloud.get_shape()[1].value
 
     input_image = tf.expand_dims(point_cloud, -1) # BxNx3 -> BxNx3x1
@@ -71,10 +72,11 @@ def get_transform(point_cloud, is_training, bn_decay=None, K = 3):
     return transform
 
 
-def get_model(point_cloud, input_label, is_training, cat_num, \
-		batch_size, num_point, weight_decay, bn_decay=None, bn=False):
+def get_model(point_cloud, input_label, is_training, cat_num, batch_size, num_point, weight_decay, bn_decay=None, bn=False):
     """ ConvNet baseline, input is BxNx3 gray image """
     end_points = {}
+    #batch_size = point_cloud.get_shape()[0].value
+    #batch_size = tf.shape(point_cloud)[0] #point_cloud.get_shape()[0].value
 
     #with tf.variable_scope('transform_net1') as sc:
     #    K = 3

@@ -18,6 +18,7 @@ def _variable_on_cpu(name, shape, initializer, use_fp16=False):
   """
   with tf.device('/cpu:0'):
     dtype = tf.float16 if use_fp16 else tf.float32
+    print("shape", shape)
     var = tf.get_variable(name, shape, initializer=initializer, dtype=dtype)
   return var
 
@@ -329,6 +330,8 @@ def fully_connected(inputs,
   """
   with tf.variable_scope(scope) as sc:
     num_input_units = inputs.get_shape()[-1].value
+    #num_input_units = tf.shape(inputs)[-1]
+    print("niu", inputs.get_shape())
     weights = _variable_with_weight_decay('weights',
                                           shape=[num_input_units, num_outputs],
                                           use_xavier=use_xavier,
