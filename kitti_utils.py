@@ -28,6 +28,8 @@ HEIGHT_FEATURES = (int((MAX_Z-MIN_Z)/HEIGHT_F_RES), int((MAX_X-MIN_X)/HEIGHT_F_R
 F_VIEW_FEATURES = (C_H, C_W, 3)
 
 class Parser(object):
+    kitti_cat_names = ['Car', 'Van', 'Truck', 'Pedestrian', 'Sitter', 'Cyclist', 'Tram', 'Misc', 'Person (sitting)']
+    kitti_cat_idxs  = range(1,1+len(kitti_cat_names))
 
     LIDAR_ANGLE = np.pi/6.
 
@@ -42,6 +44,10 @@ class Parser(object):
 
         # lidars is a dict indexed by frame: e.g. lidars[10] = np(N,4)
         self.lidars = {}
+
+        # images is a dict indexed by frame: e.g. lidars[10] = np(SY,SX,3)
+        self.images = {}
+        self.im_dim = (1242, 375) # by default
 
         # boxes is a dict indexed by frame:  e.g. boxes[10] = [box, box, ...] 
         self._boxes = None # defaultdict(list)
@@ -62,10 +68,28 @@ class Parser(object):
         return list(set(frames)) # remove duplicates
 
     def _read_lidar(self, frame):
-        kitti_data = pykitti.raw(self.basedir, self.date, self.drive, range(frame,frame+1)) #, range(start_frame, start_frame + total_frames))
-        kitti_data.load_velo()         # Each scan is a Nx4 array of [x,y,z,reflectance]
+        if frame not in self.kitti_data.frame_range:
+            self.kitti_data = pykitti.raw(self.basedir, self.date, self.drive, range(frame,frame+1)) #, range(start_frame, start_frame + total_frames))
+            self.kitti_data.load_calib() 
+        assert frame in self.kitti_data.frame_range
+        self.kitti_data.load_velo()         # Each scan is a Nx4 array of [x,y,z,reflectance]
+        self.lidars[frame] = self.kitti_data.velo[0]
+        return
 
-        self.lidars[frame] = kitti_data.velo[0]
+    def _read_image(self, frame):
+        if frame not in self.kitti_data.frame_range:
+            self.kitti_data = pykitti.raw(self.basedir, self.date, self.drive, range(frame,frame+1)) #, range(start_frame, start_frame + total_frames))
+            self.kitti_data.load_calib() 
+        assert frame in self.kitti_data.frame_range
+        self.kitti_data.load_rgb()
+        self.images[frame] = self.kitti_data.rgb[0].left
+
+        (sx,sy) = self.images[frame].shape[::-1][1:]
+
+        if self.im_dim != (sx,sy):
+            print("WARNING changing default dimensions to", (sx,sy))
+            self.im_dim = (sx,sy)
+
         return
 
     # initialize self.boxes with a dict containing frame -> [box, box, ...] 
@@ -75,24 +99,28 @@ class Parser(object):
         for t in self.tracklet_data:
             if t.objectType in only_with:
                 for frame_offset in range(t.firstFrame, t.firstFrame + t.nFrames):
-                    #if t.truncs[frame_offset-t.firstFrame]: #is tracklets.Truncation.IN_IMAGE:
-                    h,w,l = t.size
-                    trackletBox = np.array([ # in velodyne coordinates around zero point and without orientation yet\
-                        [-l/2, -l/2,  l/2, l/2, -l/2, -l/2,  l/2, l/2], \
-                        [ w/2, -w/2, -w/2, w/2,  w/2, -w/2, -w/2, w/2], \
-                        [ 0.0,  0.0,  0.0, 0.0,    h,     h,   h,   h]])
-                    yaw = t.rots[frame_offset-t.firstFrame][2]   # other rotations are 0 in all xml files I checked
-                    assert np.abs(t.rots[frame_offset-t.firstFrame][:2]).sum() == 0, 'object rotations other than yaw given!'
-                    rotMat = np.array([
-                        [np.cos(yaw), -np.sin(yaw), 0.0],
-                        [np.sin(yaw),  np.cos(yaw), 0.0],
-                        [        0.0,          0.0, 1.0]])
-                    cornerPosInVelo = np.dot(rotMat, trackletBox) + np.tile(t.trans[frame_offset-t.firstFrame], (8,1)).T
-                    self._boxes[frame_offset].append(cornerPosInVelo)
+                    if t.truncs[frame_offset-t.firstFrame] == tracklets.Truncation.IN_IMAGE:
+                        h,w,l = t.size
+                        # in velo:
+                        # A       D
+                        #
+                        # B       C
+                        trackletBox = np.array([ # in velodyne coordinates around zero point and without orientation yet\
+                            [-l/2, -l/2,  l/2, l/2, -l/2, -l/2,  l/2, l/2], \
+                            [ w/2, -w/2, -w/2, w/2,  w/2, -w/2, -w/2, w/2], \
+                            [ 0.0,  0.0,  0.0, 0.0,    h,     h,   h,   h]])
+                        yaw = t.rots[frame_offset-t.firstFrame][2]   # other rotations are 0 in all xml files I checked
+                        assert np.abs(t.rots[frame_offset-t.firstFrame][:2]).sum() == 0, 'object rotations other than yaw given!'
+                        rotMat = np.array([
+                            [np.cos(yaw), -np.sin(yaw), 0.0],
+                            [np.sin(yaw),  np.cos(yaw), 0.0],
+                            [        0.0,          0.0, 1.0]])
+                        cornerPosInVelo = np.dot(rotMat, trackletBox) + np.tile(t.trans[frame_offset-t.firstFrame], (8,1)).T
+                        self._boxes[frame_offset].append(cornerPosInVelo)
         return
 
     # given lidar points, subsample POINTS by removing points from voxels with highest density
-    def __lidar_subsample(self, lidar, POINTS):
+    def _lidar_subsample(self, lidar, POINTS):
         X_RANGE = (  0., 70.)
         Y_RANGE = (-40., 40.)
         Z_RANGE = ( -2.,  2.)
@@ -140,8 +168,57 @@ class Parser(object):
                 i += v
         return subsampled
 
-    # returns lidar points with associated label into (Nx5 array)
-    # defa to MAX_POINTS if provided
+    # For each detected object in frame, returns a list of 
+    # - lidar_in_2d_bbox (MAX_POINTS, 3)
+    # - label of object
+    # - bbox 6 -> (Ax, Ay, Bx, By, l, h) 
+    def lidar_cone_of_detected_objects(self, frame, return_image=False):
+        if frame not in self.lidars:
+            self._read_lidar(frame)
+            assert frame in self.lidars
+        lidar = self.lidars[frame]
+
+        if return_image:
+            if frame not in self.images:
+                self._read_image(frame)
+                assert frame in self.images
+            image = self.images[frame]
+
+        assert self._boxes is not None
+
+        lidar_cones = []
+        for box in self._boxes[frame]:
+            lidar_in_2d_bbox = self.__lidar_in_2d_box(lidar, box)
+
+            # we'll pass two lower points A and B, and l and h (that defines the bounding box in 3d)
+            A = np.array([box[0,0], box[1,0]])
+            B = np.array([box[0,1], box[1,1]])
+            C = np.array([box[0,3], box[1,3]])
+            l = np.linalg.norm(C-B)
+            h = np.array([box[2,4]-box[2,0]])
+            #import code
+            #code.interact(local=locals())
+            bbox = np.concatenate((A,B,[l],h), axis=0)
+            lidar_cones.append((lidar_in_2d_bbox, bbox, Parser.kitti_cat_idxs[0])) # TODO: deal with categories 
+
+            if return_image:
+                bbox_l, bbox_h = self.__box_to_2d_box(box)
+                _bbox_l = (int(bbox_l[0]), int(bbox_l[1]))
+                _bbox_h = (int(bbox_h[0]), int(bbox_h[1]))
+                image = cv2.rectangle(image, _bbox_l, _bbox_h, (1.,1.,1.))
+                print(lidar_in_2d_bbox.shape[0], "found in", bbox_l, bbox_h)
+
+        if return_image:
+            top_view = self.top_view(frame, with_boxes = True, SX = image.shape[1])
+            print("top_view shape", top_view.shape)
+            image = np.concatenate((image, top_view), axis=0)
+            print("Frame", frame, "Image now", image.shape)
+
+        if return_image:
+            return lidar_cones, image
+        return lidar_cones
+
+
     def lidar_with_label(self, frame, MAX_POINTS=None):
         if frame not in self.lidars:
             self._read_lidar(frame)
@@ -153,7 +230,35 @@ class Parser(object):
         lidar = np.concatenate((lidar, lidar_o), axis=0)
 
         if (MAX_POINTS is not None) and (MAX_POINTS < lidar.shape[0]):
-            lidar = self.__lidar_subsample(lidar, MAX_POINTS)
+            lidar = self._lidar_subsample(lidar, MAX_POINTS)
+
+        _lidar_with_label = np.empty((lidar.shape[0], 5))
+        _lidar_with_label[:,0:4] = lidar[:,:]
+        _lidar_with_label[:,4] = 0
+        
+        assert self._boxes is not None
+        for box in self._boxes[frame]:
+            idx = self.__lidar_in_box(_lidar_with_label, box, return_idx_only = True)
+            _lidar_with_label[idx,4] = 1
+
+        return _lidar_with_label
+
+
+
+    # returns lidar points with associated label into (Nx5 array)
+    # defaults to MAX_POINTS if not provided
+    def lidar_with_label(self, frame, MAX_POINTS=None):
+        if frame not in self.lidars:
+            self._read_lidar(frame)
+            assert frame in self.lidars
+        lidar = self.lidars[frame]
+        lidar, lidar_o = self.__project(lidar, return_projection=False, return_velo_in_img=True, return_velo_outside_img=True)
+        if self.LIDAR_ANGLE is not None:
+            lidar_o = lidar_o[np.arctan2(lidar_o[:,0],np.absolute(lidar_o[:,1])) >= self.LIDAR_ANGLE]
+        lidar = np.concatenate((lidar, lidar_o), axis=0)
+
+        if (MAX_POINTS is not None) and (MAX_POINTS < lidar.shape[0]):
+            lidar = self._lidar_subsample(lidar, MAX_POINTS)
 
         _lidar_with_label = np.empty((lidar.shape[0], 5))
         _lidar_with_label[:,0:4] = lidar[:,:]
@@ -168,15 +273,20 @@ class Parser(object):
 
     # return a top view of the lidar image for frame
     # draw boxes for tracked objects if with_boxes is True
-    def top_view(self, frame, with_boxes = True, lidar_override = None):
-        # ranges in lidar coords
-        X_RANGE = (  0., 70.)
-        Y_RANGE = (-40., 40.)
-        Z_RANGE = ( -2.,  2.)
-        RES = 0.2
-
-        Y_PIXELS = int((Y_RANGE[1]-Y_RANGE[0]) / RES)
-        X_PIXELS = int((X_RANGE[1]-X_RANGE[0]) / RES)
+    def top_view(self, frame, with_boxes = True, lidar_override = None, SX = None):
+        # ranges in lidar coords, including lower end, excluding higher end
+        X_RANGE = (  0., 100.) 
+        Y_RANGE = (-40.,  40.)
+        Z_RANGE = ( -2.,   2.)
+        if SX is None:
+            RES = 0.2
+            Y_PIXELS = int((Y_RANGE[1]-Y_RANGE[0]) / RES)
+        else:
+            Y_PIXELS = SX
+            RES = (Y_RANGE[1]-Y_RANGE[0]) / SX
+        import math
+        X_PIXELS = int(math.ceil((X_RANGE[1]-X_RANGE[0]) / RES))
+        print(X_PIXELS, Y_PIXELS, RES)
 
         top_view = np.zeros(shape=(X_PIXELS, Y_PIXELS, 3),dtype=np.float32)
 
@@ -186,11 +296,15 @@ class Parser(object):
 
         # convert from lidar x y to top view X Y 
         def toY(y):
-            return int((y-Y_RANGE[0]) // RES)
+#            return int((Y_RANGE[1]-y) // RES)
+            return int((Y_PIXELS-1) - (y-Y_RANGE[0]) // RES)
         def toX(x):
             return int((X_PIXELS-1) - (x-X_RANGE[0]) // RES)
         def toXY(x,y):
             return (toY(y), toX(x))
+
+        def inRange(x,y):
+            return (x >= X_RANGE[0]) and (x < X_RANGE[1]) and (y >= Y_RANGE[0]) and (y < Y_RANGE[1])
 
         if lidar_override is not None:
             lidar = lidar_override
@@ -201,12 +315,12 @@ class Parser(object):
 
         for point in in_img:
             x, y = point[0], point[1]
-            if (x >= X_RANGE[0]) and (x <= X_RANGE[1]) and (y >= Y_RANGE[0]) and (y <= Y_RANGE[1]):
+            if inRange(x,y):
                 top_view[toXY(x,y)[::-1] ] = (1., 1., 1.)
 
         for point in outside_img:
             x, y = point[0], point[1]
-            if (x >= X_RANGE[0]) and (x <= X_RANGE[1]) and (y >= Y_RANGE[0]) and (y <= Y_RANGE[1]):
+            if inRange(x,y):
                 c = (0.2,0.2,0.2)
                 if (self.LIDAR_ANGLE is not None) and (np.arctan2(x,np.absolute(y)) >= self.LIDAR_ANGLE):
                     c = (0.5, 0.5, 0.5)    
@@ -223,12 +337,42 @@ class Parser(object):
 
                 cv2.polylines(top_view, [np.int32((a,b,c,d)).reshape((-1,1,2))], True,(1.,0.,0.), thickness=1)
 
-                for point in self._lidar_in_box(frame, box):
-                    x = point[0]
-                    y = point[1]
-                    top_view[toXY(x,y)[::-1] ] = (0., 1., 1.)
+                lidar_in_box = self._lidar_in_box(frame, box)
+                print(lidar_in_box.shape)
+                for point in lidar_in_box:
+                    x,y = point[0], point[1]
+                    if inRange(x,y):
+                        top_view[toXY(x,y)[::-1] ] = (0., 1., 1.)
 
         return top_view
+
+    def __box_to_2d_box(self, box):
+        print("Frame", self.kitti_data.frame_range, "box", box)
+        box_in_img = self.__project(box.T, return_projection=True, dim_limit=None, return_velo_in_img=False, return_velo_outside_img=False)
+        # some boxes are behind the viewpoint (eg. frame 70 @ drive 0036 ) and would return empty set of points
+        # so we return an empty box
+        print("box_in_img.shape", box_in_img.shape)
+        if box_in_img.shape[0] != 8:
+            return (0,0),(0,0)
+        #print("lidar box", box.T,"in img", box_in_img)
+        dim_limit = self.im_dim
+        print(dim_limit, box_in_img)
+        # clip 2d box corners within image
+        box_in_img[:,0] = np.clip(box_in_img[:,0], 0, dim_limit[0])
+        box_in_img[:,1] = np.clip(box_in_img[:,1], 0, dim_limit[1])
+        # get 2d bbox
+        bbox_l =(np.amin(box_in_img[:,0]), np.amin(box_in_img[:,1]))
+        bbox_h =(np.amax(box_in_img[:,0]), np.amax(box_in_img[:,1]))
+        return bbox_l, bbox_h
+
+
+    def __lidar_in_2d_box(self, lidar, box):
+        bbox_l, bbox_h = self.__box_to_2d_box(box)
+        #print("2d clipping box", bbox_l, bbox_h, "filtering", lidar.shape)
+        lidar_in_2d_box = self.__project(lidar, 
+            return_projection=False, dim_limit=bbox_h, dim_limit_zero=bbox_l, return_velo_in_img=True, return_velo_outside_img=False)
+        #print("got", lidar_in_2d_box.shape, "in box")
+        return lidar_in_2d_box
 
     # returns lidar points that are inside a given box, or just the indexes 
     def _lidar_in_box(self, frame, box):
@@ -263,7 +407,7 @@ class Parser(object):
         if return_idx_only:
             return in_box_idx
 
-        points_in_box = np.squeeze(lidar[in_box_idx,:])
+        points_in_box = np.squeeze(lidar[in_box_idx,:], axis=0)
         return points_in_box
 
 
@@ -278,12 +422,17 @@ class Parser(object):
     # Optionally providing dim_limit (sx,sy) limits projections that end up within (0-sx,0-sy)
     # only_forward to only get points with Z >= 0
     #
-    def __project(self, points, dim_limit=(1242, 375), 
+    def __project(self, points, 
+        dim_limit=(-1,-1), 
+        dim_limit_zero=(0,0),
         only_forward = True, 
         return_projection = True, 
         return_velo_in_img = True, 
         return_velo_outside_img = False, 
         return_append = None):
+
+        if dim_limit == (-1,-1):
+            dim_limit = self.im_dim
 
         assert return_projection or return_velo_in_img
 
@@ -305,7 +454,8 @@ class Parser(object):
 
         if dim_limit is not None:
             x_limit, y_limit = dim_limit[0], dim_limit[1]
-            only_in_img = (projection[:,0] >= 0.) & (projection[:,0] < x_limit) & (projection[:,1] >= 0.) & (projection[:,1] < y_limit)
+            x_limit_z, y_limit_z = dim_limit_zero[0], dim_limit_zero[1]
+            only_in_img = (projection[:,0] >= x_limit_z) & (projection[:,0] < x_limit) & (projection[:,1] >= y_limit_z) & (projection[:,1] < y_limit)
             projection = projection[only_in_img]
             if return_velo_in_img:
                 if return_velo_outside_img:
