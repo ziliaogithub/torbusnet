@@ -52,16 +52,20 @@ class Parser(object):
         # boxes is a dict indexed by frame:  e.g. boxes[10] = [box, box, ...] 
         self._boxes = None # defaultdict(list)
 
+    # include tracklet IFF in image and not occluded
+    # WARNING: There's a lot of tracklets with occs=-1 (255) which we need to fix
+    def __include_tracklet(self, t, idx):
+        return (t.truncs[idx] == tracklets.Truncation.IN_IMAGE) and (t.occs[idx,0] == 0)
+
     # return list of frames where tracked objects of type only_with are visible (in image)
+
     def frames(self, only_with):
         frames = []
         for t in self.tracklet_data:
             if t.objectType in only_with:
                 for frame_offset in range(t.firstFrame,t.firstFrame + t.nFrames):
-                    if t.truncs[frame_offset-t.firstFrame]: #is tracklets.Truncation.IN_IMAGE:
+                    if self.__include_tracklet(t, frame_offset-t.firstFrame):
                         frames.append(frame_offset)
-                    else:
-                        print("No truncation data!")
             else:
                 print("UNTRACKED", t.objectType)
         self._init_boxes(only_with)
@@ -73,6 +77,7 @@ class Parser(object):
             self.kitti_data.load_calib() 
         assert frame in self.kitti_data.frame_range
         self.kitti_data.load_velo()         # Each scan is a Nx4 array of [x,y,z,reflectance]
+        assert len(self.kitti_data.velo) == 1
         self.lidars[frame] = self.kitti_data.velo[0]
         return
 
@@ -99,7 +104,8 @@ class Parser(object):
         for t in self.tracklet_data:
             if t.objectType in only_with:
                 for frame_offset in range(t.firstFrame, t.firstFrame + t.nFrames):
-                    if t.truncs[frame_offset-t.firstFrame] == tracklets.Truncation.IN_IMAGE:
+                    idx = frame_offset-t.firstFrame
+                    if self.__include_tracklet(t, idx):
                         h,w,l = t.size
                         # in velo:
                         # A       D
@@ -109,22 +115,22 @@ class Parser(object):
                             [-l/2, -l/2,  l/2, l/2, -l/2, -l/2,  l/2, l/2], \
                             [ w/2, -w/2, -w/2, w/2,  w/2, -w/2, -w/2, w/2], \
                             [ 0.0,  0.0,  0.0, 0.0,    h,     h,   h,   h]])
-                        yaw = t.rots[frame_offset-t.firstFrame][2]   # other rotations are 0 in all xml files I checked
-                        assert np.abs(t.rots[frame_offset-t.firstFrame][:2]).sum() == 0, 'object rotations other than yaw given!'
+                        yaw = t.rots[idx][2]   # other rotations are 0 in all xml files I checked
+                        assert np.abs(t.rots[idx][:2]).sum() == 0, 'object rotations other than yaw given!'
                         rotMat = np.array([
                             [np.cos(yaw), -np.sin(yaw), 0.0],
                             [np.sin(yaw),  np.cos(yaw), 0.0],
                             [        0.0,          0.0, 1.0]])
-                        cornerPosInVelo = np.dot(rotMat, trackletBox) + np.tile(t.trans[frame_offset-t.firstFrame], (8,1)).T
+                        cornerPosInVelo = np.dot(rotMat, trackletBox) + np.tile(t.trans[idx], (8,1)).T
                         self._boxes[frame_offset].append(cornerPosInVelo)
         return
 
     # given lidar points, subsample POINTS by removing points from voxels with highest density
     def _lidar_subsample(self, lidar, POINTS):
-        X_RANGE = (  0., 70.)
-        Y_RANGE = (-40., 40.)
-        Z_RANGE = ( -2.,  2.)
-        RES = 0.2
+        #X_RANGE = (  0., 70.)
+        #Y_RANGE = (-40., 40.)
+        #Z_RANGE = ( -2.,  2.)
+        # RES = 0.2 (not needed)
 
         NX = 10
         NY = 10
@@ -203,16 +209,14 @@ class Parser(object):
 
             if return_image:
                 bbox_l, bbox_h = self.__box_to_2d_box(box)
-                _bbox_l = (int(bbox_l[0]), int(bbox_l[1]))
+                _bbox_l = (int(bbox_l[0]), int(bbox_l[1])) # todo ROUND result
                 _bbox_h = (int(bbox_h[0]), int(bbox_h[1]))
                 image = cv2.rectangle(image, _bbox_l, _bbox_h, (1.,1.,1.))
                 print(lidar_in_2d_bbox.shape[0], "found in", bbox_l, bbox_h)
 
         if return_image:
             top_view = self.top_view(frame, with_boxes = True, SX = image.shape[1])
-            print("top_view shape", top_view.shape)
             image = np.concatenate((image, top_view), axis=0)
-            print("Frame", frame, "Image now", image.shape)
 
         if return_image:
             return lidar_cones, image
@@ -273,7 +277,7 @@ class Parser(object):
 
     # return a top view of the lidar image for frame
     # draw boxes for tracked objects if with_boxes is True
-    def top_view(self, frame, with_boxes = True, lidar_override = None, SX = None):
+    def top_view(self, frame, with_boxes = True, lidar_override = None, SX = None, abl_override=None):
         # ranges in lidar coords, including lower end, excluding higher end
         X_RANGE = (  0., 100.) 
         Y_RANGE = (-40.,  40.)
@@ -290,10 +294,6 @@ class Parser(object):
 
         top_view = np.zeros(shape=(X_PIXELS, Y_PIXELS, 3),dtype=np.float32)
 
-        if frame not in self.lidars:
-            self._read_lidar(frame)
-            assert frame in self.lidars
-
         # convert from lidar x y to top view X Y 
         def toY(y):
 #            return int((Y_RANGE[1]-y) // RES)
@@ -309,6 +309,9 @@ class Parser(object):
         if lidar_override is not None:
             lidar = lidar_override
         else:
+            if frame not in self.lidars:
+                self._read_lidar(frame)
+                assert frame in self.lidars
             lidar = self.lidars[frame]
 
         in_img, outside_img = self.__project(lidar, return_projection=False, return_velo_in_img=True, return_velo_outside_img=True)
@@ -338,11 +341,15 @@ class Parser(object):
                 cv2.polylines(top_view, [np.int32((a,b,c,d)).reshape((-1,1,2))], True,(1.,0.,0.), thickness=1)
 
                 lidar_in_box = self._lidar_in_box(frame, box)
-                print(lidar_in_box.shape)
                 for point in lidar_in_box:
                     x,y = point[0], point[1]
                     if inRange(x,y):
                         top_view[toXY(x,y)[::-1] ] = (0., 1., 1.)
+
+        if abl_override is not None:
+            a = toXY(abl_override[0], abl_override[1])
+            b = toXY(abl_override[2], abl_override[3])
+            cv2.polylines(top_view, [np.int32((a,b)).reshape((-1,1,2))], True,(1.,0.,0.), thickness=1)
 
         return top_view
 
@@ -436,7 +443,7 @@ class Parser(object):
 
         assert return_projection or return_velo_in_img
 
-        K = self.kitti_data.calib.K_cam2
+        K = self.kitti_data.calib.K_cam0 # cam2 or cam0
         R = np.eye(4)
         R[0:3,0:3] = K
         T= np.dot(R, self.kitti_data.calib.T_cam2_velo)[0:3]

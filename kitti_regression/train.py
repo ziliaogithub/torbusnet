@@ -115,20 +115,19 @@ def train():
             '''
             learning_rate = 1e-3 # tf.maximum(learning_rate, LEARNING_RATE_CLIP)
         
-            bn_momentum = tf.train.exponential_decay(
-                      BN_INIT_DECAY,
-                      batch*batch_size,
-                      BN_DECAY_DECAY_STEP,
-                      BN_DECAY_DECAY_RATE,
-                      staircase=True)
-            bn_decay = tf.minimum(BN_DECAY_CLIP, 1 - bn_momentum)
+            #bn_momentum = tf.train.exponential_decay(
+            #          BN_INIT_DECAY,
+            #          batch*batch_size,
+            #          BN_DECAY_DECAY_STEP,
+            #          BN_DECAY_DECAY_RATE,
+            #          staircase=True)
+            #bn_decay = tf.minimum(BN_DECAY_CLIP, 1 - bn_momentum)
 
             lr_op = tf.summary.scalar('learning_rate', learning_rate)
             batch_op = tf.summary.scalar('batch_number', batch)
-            bn_decay_op = tf.summary.scalar('bn_decay', bn_decay)
  
             bbox_A_pred, bbox_B_pred, bbox_l_pred, end_points = model.get_model(pointclouds_ph, input_label_ph, \
-                    is_training=is_training_ph, bn_decay=bn_decay, cat_num=NUM_CATEGORIES, batch_size=batch_size, num_point=point_num, weight_decay=FLAGS.wd)
+                    is_training=is_training_ph, cat_num=NUM_CATEGORIES, batch_size=batch_size, num_point=point_num)
 
             # model.py defines both classification net and segmentation net, which share the common global feature extractor network.
             # In model.get_loss, we define the total loss to be weighted sum of the classification and segmentation losses.
@@ -198,8 +197,6 @@ def train():
                 printout(flog, 'Loading train file ' + cur_train_filename)
 
                 cur_data, cur_labels, cur_boxes = provider.loadDataFile(cur_train_filename, point_num)
-                #cur_labels = np.squeeze(cur_labels)
-                #cur_labels_one_hot = convert_label_to_one_hot(cur_labels)
                 print(cur_data.shape, cur_boxes.shape)
 
                 num_data = cur_data.shape[0]
@@ -227,8 +224,10 @@ def train():
                             = sess.run([train_op, loss, bbox_A_loss, bbox_B_loss, bbox_l_loss, bbox_A_pred ], feed_dict = feed_dict)
 
                     if (j == num_batch -1):
+                        feed_dict[is_training_ph] = False
                         bbox_A_pred_val2 = sess.run([bbox_A_pred ], feed_dict = feed_dict)
-                        print(cur_boxes[begidx: endidx, ..., 0:2], bbox_A_pred_val, bbox_A_pred_val2)
+                        bbox_A_pred_val3 = sess.run([bbox_A_pred ], feed_dict = feed_dict)
+                        print(cur_boxes[begidx: endidx, ..., 0:2], bbox_A_pred_val, bbox_A_pred_val2, bbox_A_pred_val3)
                     if epoch >= 20:
                         #import code
                         #code.interact(local=dict(globals(), **locals())) 
@@ -246,37 +245,39 @@ def train():
                    # total_label_acc += np.mean(np.float32(per_instance_label_pred == cur_labels[begidx: endidx, ...]))
                    # total_seg_acc += average_part_acc
 
-                total_loss /= num_batch
-                total_bbox_A_loss /=  num_batch
-                total_bbox_B_loss /=  num_batch
-                total_bbox_l_loss /=  num_batch
+                if num_batch == 0:
+                    printout(flog, '\tNO SAMPLES ON THIS TRAINING FILE')
+                else:
+                    total_loss /= num_batch
+                    total_bbox_A_loss /=  num_batch
+                    total_bbox_B_loss /=  num_batch
+                    total_bbox_l_loss /=  num_batch
 
-# total_training_loss_ph, bbox_A_training_loss_ph, bbox_B_training_loss_ph, bbox_l_training_loss_ph, training_iou_ph
+    # total_training_loss_ph, bbox_A_training_loss_ph, bbox_B_training_loss_ph, bbox_l_training_loss_ph, training_iou_ph
 
-                lr_sum, bn_decay_sum, batch_sum, \
-                train_loss_sum, train_bbox_A_loss_sum, train_bbox_B_loss_sum, train_bbox_l_loss_sum = \
-                sess.run( \
-                    [lr_op, bn_decay_op, batch_op, 
-                    total_train_loss_sum_op, bbox_A_training_loss_sum_op, bbox_B_training_loss_sum_op,  bbox_l_training_loss_sum_op],
-                    feed_dict = {
-                    total_training_loss_ph:     total_loss, 
-                    bbox_A_training_loss_ph:    total_bbox_A_loss,
-                    bbox_B_training_loss_ph:    total_bbox_B_loss, 
-                    bbox_l_training_loss_ph:    total_bbox_l_loss
-                    } )
+                    lr_sum, batch_sum, \
+                    train_loss_sum, train_bbox_A_loss_sum, train_bbox_B_loss_sum, train_bbox_l_loss_sum = \
+                    sess.run( \
+                        [lr_op, batch_op, 
+                        total_train_loss_sum_op, bbox_A_training_loss_sum_op, bbox_B_training_loss_sum_op,  bbox_l_training_loss_sum_op],
+                        feed_dict = {
+                        total_training_loss_ph:     total_loss, 
+                        bbox_A_training_loss_ph:    total_bbox_A_loss,
+                        bbox_B_training_loss_ph:    total_bbox_B_loss, 
+                        bbox_l_training_loss_ph:    total_bbox_l_loss
+                        } )
 
-                train_writer.add_summary(train_loss_sum, i + epoch_num * num_train_file)
-                train_writer.add_summary(train_bbox_A_loss_sum, i + epoch_num * num_train_file)
-                train_writer.add_summary(train_bbox_B_loss_sum, i + epoch_num * num_train_file)
-                train_writer.add_summary(train_bbox_l_loss_sum, i + epoch_num * num_train_file)
-                train_writer.add_summary(lr_sum, i + epoch_num * num_train_file)
-                train_writer.add_summary(bn_decay_sum, i + epoch_num * num_train_file)
-                train_writer.add_summary(batch_sum, i + epoch_num * num_train_file)
+                    train_writer.add_summary(train_loss_sum, i + epoch_num * num_train_file)
+                    train_writer.add_summary(train_bbox_A_loss_sum, i + epoch_num * num_train_file)
+                    train_writer.add_summary(train_bbox_B_loss_sum, i + epoch_num * num_train_file)
+                    train_writer.add_summary(train_bbox_l_loss_sum, i + epoch_num * num_train_file)
+                    train_writer.add_summary(lr_sum, i + epoch_num * num_train_file)
+                    train_writer.add_summary(batch_sum, i + epoch_num * num_train_file)
 
-                printout(flog, '\tTraining Total Mean_loss: %f' % total_loss)
-                printout(flog, '\t\tTraining A box loss: %f' % total_bbox_A_loss)
-                printout(flog, '\t\tTraining B box loss: %f' % total_bbox_B_loss)
-                printout(flog, '\t\tTraining l box loss: %f' % total_bbox_l_loss)
+                    printout(flog, '\tTraining Total Mean_loss: %f' % total_loss)
+                    printout(flog, '\t\tTraining A box loss: %f' % total_bbox_A_loss)
+                    printout(flog, '\t\tTraining B box loss: %f' % total_bbox_B_loss)
+                    printout(flog, '\t\tTraining l box loss: %f' % total_bbox_l_loss)
 
         def eval_one_epoch(epoch_num):
             is_training = False
@@ -296,19 +297,12 @@ def train():
                 printout(flog, 'Loading test file ' + cur_test_filename)
 
                 cur_data, cur_labels, cur_boxes = provider.loadDataFile(cur_test_filename, point_num)
-                #cur_labels = np.squeeze(cur_labels)
-                #cur_labels_one_hot = convert_label_to_one_hot(cur_labels)
                 print(cur_data.shape, cur_boxes.shape)
 
                 num_data = cur_data.shape[0]
                 num_batch = int(-(-num_data // batch_size))
 
                 print("items", num_data, "batches to do", num_batch)
-                total_loss = 0.0
-                total_bbox_A_loss = 0.0
-                total_bbox_B_loss = 0.0
-                total_bbox_l_loss = 0.0
-                total_seen = 0
 
                 for j in range(num_batch):
                     begidx = j * batch_size
@@ -357,39 +351,36 @@ def train():
                     #    total_label_acc_per_cat[cur_labels[shape_idx]] += np.int32(per_instance_label_pred[shape_idx-begidx] == cur_labels[shape_idx])
                     #    total_seg_acc_per_cat[cur_labels[shape_idx]] += per_instance_part_acc[shape_idx - begidx]
 
-            total_loss /= total_seen
-            total_bbox_A_loss /=  total_seen
-            total_bbox_B_loss /=  total_seen
-            total_bbox_l_loss /=  total_seen
+            if total_seen == 0:
+                printout(flog, '\tNO SAMPLES ON THIS TEST FILE')
+            else:
+                total_loss /= total_seen
+                total_bbox_A_loss /=  total_seen
+                total_bbox_B_loss /=  total_seen
+                total_bbox_l_loss /=  total_seen
 
-            '''
-            test_loss_sum, test_bbox_A_loss_sum, test_bbox_B_loss_sum, test_bbox_l_loss_sum, test_iou = sess.run(
-                [total_test_loss_sum_op, bbox_A_testing_loss_sum_op, bbox_B_testing_loss_sum_op,  bbox_l_testing_loss_sum_op, 
-                            testing_iou_sum_op],
-                            feed_dict = {
-                            total_testing_loss_ph: total_loss, 
-                            bbox_A_testing_loss_ph: total_bbox_A_loss,
-                            bbox_B_testing_loss_ph: total_bbox_B_loss, 
-                            bbox_l_testing_loss_ph: total_bbox_l_loss, 
-                            testing_iou_ph: total_iou } )
+                '''
+                test_loss_sum, test_bbox_A_loss_sum, test_bbox_B_loss_sum, test_bbox_l_loss_sum, test_iou = sess.run(
+                    [total_test_loss_sum_op, bbox_A_testing_loss_sum_op, bbox_B_testing_loss_sum_op,  bbox_l_testing_loss_sum_op, 
+                                testing_iou_sum_op],
+                                feed_dict = {
+                                total_testing_loss_ph: total_loss, 
+                                bbox_A_testing_loss_ph: total_bbox_A_loss,
+                                bbox_B_testing_loss_ph: total_bbox_B_loss, 
+                                bbox_l_testing_loss_ph: total_bbox_l_loss, 
+                                testing_iou_ph: total_iou } )
 
-            test_writer.add_summary(test_loss_sum, (epoch_num+1) * num_train_file-1)
-            test_writer.add_summary(test_bbox_A_loss_sum, (epoch_num+1) * num_train_file-1)
-            test_writer.add_summary(test_bbox_B_loss_sum, (epoch_num+1) * num_train_file-1)
-            test_writer.add_summary(test_bbox_l_loss_sum, (epoch_num+1) * num_train_file-1)
-            test_writer.add_summary(test_iou, (epoch_num+1) * num_train_file-1)
-            '''
+                test_writer.add_summary(test_loss_sum, (epoch_num+1) * num_train_file-1)
+                test_writer.add_summary(test_bbox_A_loss_sum, (epoch_num+1) * num_train_file-1)
+                test_writer.add_summary(test_bbox_B_loss_sum, (epoch_num+1) * num_train_file-1)
+                test_writer.add_summary(test_bbox_l_loss_sum, (epoch_num+1) * num_train_file-1)
+                test_writer.add_summary(test_iou, (epoch_num+1) * num_train_file-1)
+                '''
 
-            printout(flog, '\tTesting Total Mean_loss: %f' % total_loss)
-            printout(flog, '\t\tTesting A box loss: %f' % total_bbox_A_loss)
-            printout(flog, '\t\tTesting B box loss: %f' % total_bbox_B_loss)
-            printout(flog, '\t\tTesting l box loss: %f' % total_bbox_l_loss)
-
-            #for cat_idx in range(NUM_CATEGORIES):
-            #    if total_seen_per_cat[cat_idx] > 0:
-            #        printout(flog, '\n\t\tCategory %s Object Number: %d' % (all_obj_cats[cat_idx][0], total_seen_per_cat[cat_idx]))
-            #        printout(flog, '\t\tCategory %s Label Accuracy: %f' % (all_obj_cats[cat_idx][0], total_label_acc_per_cat[cat_idx]/total_seen_per_cat[cat_idx]))
-            #        printout(flog, '\t\tCategory %s Seg Accuracy: %f' % (all_obj_cats[cat_idx][0], total_seg_acc_per_cat[cat_idx]/total_seen_per_cat[cat_idx]))
+                printout(flog, '\tTesting Total Mean_loss: %f' % total_loss)
+                printout(flog, '\t\tTesting A box loss: %f' % total_bbox_A_loss)
+                printout(flog, '\t\tTesting B box loss: %f' % total_bbox_B_loss)
+                printout(flog, '\t\tTesting l box loss: %f' % total_bbox_l_loss)
 
         if not os.path.exists(MODEL_STORAGE_PATH):
             os.mkdir(MODEL_STORAGE_PATH)
@@ -400,7 +391,7 @@ def train():
 
             printout(flog, '\n>>> Training for the epoch %d/%d ...' % (epoch, TRAINING_EPOCHES))
 
-            train_file_idx = np.arange(0, len(train_file_list))
+            train_file_idx = np.arange(len(train_file_list))
             np.random.shuffle(train_file_idx)
 
             train_one_epoch(train_file_idx, epoch)

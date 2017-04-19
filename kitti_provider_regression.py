@@ -124,7 +124,19 @@ def load_h5_data_label_seg(h5_filename, MAX_POINTS, MIN_POINTS=20, IMAGE_STORAGE
         for point_cloud in data:
             np.random.shuffle(point_cloud)    
         assert data.shape[1:3] == (MAX_POINTS,3)
-        #assert label.shape[1]  == 1
+
+        if True:
+            (basedir, date, drive) = parse_filename(h5_filename)
+            print("Dummy loading", basedir, date, drive)
+            parser = kitti_utils.Parser(basedir, date, drive)
+            ii = 0
+            for abl, lidar in zip(boxes, data):
+                if not os.path.exists(IMAGE_STORAGE_PATH):
+                    os.mkdir(IMAGE_STORAGE_PATH)
+
+                img = parser.top_view(0, with_boxes = False, lidar_override = lidar, abl_override=abl)
+                imsave('{}/GT{}-{}.png'.format(IMAGE_STORAGE_PATH, drive, ii), img)
+                ii += 1
 
         return (normalize(data), label, boxes)
 
