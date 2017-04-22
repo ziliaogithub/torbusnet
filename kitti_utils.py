@@ -107,6 +107,7 @@ class Parser(object):
                     idx = frame_offset-t.firstFrame
                     if self.__include_tracklet(t, idx):
                         h,w,l = t.size
+                        assert (h > 0. ) and (w > 0.) and (l > 0.)
                         # in velo:
                         # A       D
                         #
@@ -116,6 +117,16 @@ class Parser(object):
                             [ w/2, -w/2, -w/2, w/2,  w/2, -w/2, -w/2, w/2], \
                             [ 0.0,  0.0,  0.0, 0.0,    h,     h,   h,   h]])
                         yaw = t.rots[idx][2]   # other rotations are 0 in all xml files I checked
+
+                        # IMPORTANT -> ignoring orientation so that we get ordered coordinates w/o orientation
+                        yaw  = np.fmod(yaw, np.pi)
+                        if yaw >= np.pi/2.:
+                            yaw -= np.pi
+                        elif yaw <= -np.pi/2.:
+                            yaw += np.pi
+
+                        assert (yaw <= np.pi/2) and (yaw >= -np.pi/2)
+
                         assert np.abs(t.rots[idx][:2]).sum() == 0, 'object rotations other than yaw given!'
                         rotMat = np.array([
                             [np.cos(yaw), -np.sin(yaw), 0.0],
@@ -174,7 +185,7 @@ class Parser(object):
                 i += v
         return subsampled
 
-    # For each detected object in frame, returns a list of 
+    # For each detected object in frame, returns list of 
     # - lidar_in_2d_bbox (MAX_POINTS, 3)
     # - label of object
     # - bbox 6 -> (Ax, Ay, Bx, By, l, h) 
@@ -277,7 +288,12 @@ class Parser(object):
 
     # return a top view of the lidar image for frame
     # draw boxes for tracked objects if with_boxes is True
-    def top_view(self, frame, with_boxes = True, lidar_override = None, SX = None, abl_override=None):
+    #
+    # SX are horizontal pixels of resulting image (vertical pixels maintain AR), 
+    # useful if you want to stack lidar below or above camera image
+    #
+    # if abl_override is provided it draws 
+    def top_view(self, frame, with_boxes = True, lidar_override = None, SX = None, abl_overrides=None):
         # ranges in lidar coords, including lower end, excluding higher end
         X_RANGE = (  0., 100.) 
         Y_RANGE = (-40.,  40.)
@@ -290,7 +306,6 @@ class Parser(object):
             RES = (Y_RANGE[1]-Y_RANGE[0]) / SX
         import math
         X_PIXELS = int(math.ceil((X_RANGE[1]-X_RANGE[0]) / RES))
-        print(X_PIXELS, Y_PIXELS, RES)
 
         top_view = np.zeros(shape=(X_PIXELS, Y_PIXELS, 3),dtype=np.float32)
 
@@ -346,24 +361,39 @@ class Parser(object):
                     if inRange(x,y):
                         top_view[toXY(x,y)[::-1] ] = (0., 1., 1.)
 
-        if abl_override is not None:
-            a = toXY(abl_override[0], abl_override[1])
-            b = toXY(abl_override[2], abl_override[3])
-            cv2.polylines(top_view, [np.int32((a,b)).reshape((-1,1,2))], True,(1.,0.,0.), thickness=1)
+        if abl_overrides is not None:
+            color = np.array([1.,0.,0.])
+            print("abl_overrides", abl_overrides)
+            for i, abl_override in enumerate(abl_overrides):
+                # A B are lidar bottom box corners 
+                A = np.array([abl_override[0], abl_override[1]])
+                B = np.array([abl_override[2], abl_override[3]])
+                l = abl_override[4]
+
+                # given A,B and l, compute C and D by rotating -90 l * AB/|AB| and adding to B
+                rot90 = np.array([[0,1], [-1, 0]])    
+                AB    = B-A
+                ABn   = np.linalg.norm(AB)
+                C     = B + l * np.dot(AB, rot90) / ABn 
+                D     = C - AB
+
+                c = toXY(C[0], C[1])
+                d = toXY(D[0], D[1])
+                a = toXY(abl_override[0], abl_override[1])
+                b = toXY(abl_override[2], abl_override[3])
+
+                cv2.polylines(top_view, [np.int32((a,b,c,d)).reshape((-1,1,2))], True, np.roll(color, i), thickness=1)
 
         return top_view
 
     def __box_to_2d_box(self, box):
-        print("Frame", self.kitti_data.frame_range, "box", box)
         box_in_img = self.__project(box.T, return_projection=True, dim_limit=None, return_velo_in_img=False, return_velo_outside_img=False)
         # some boxes are behind the viewpoint (eg. frame 70 @ drive 0036 ) and would return empty set of points
         # so we return an empty box
-        print("box_in_img.shape", box_in_img.shape)
         if box_in_img.shape[0] != 8:
             return (0,0),(0,0)
         #print("lidar box", box.T,"in img", box_in_img)
         dim_limit = self.im_dim
-        print(dim_limit, box_in_img)
         # clip 2d box corners within image
         box_in_img[:,0] = np.clip(box_in_img[:,0], 0, dim_limit[0])
         box_in_img[:,1] = np.clip(box_in_img[:,1], 0, dim_limit[1])

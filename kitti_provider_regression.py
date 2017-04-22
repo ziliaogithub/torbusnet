@@ -11,6 +11,7 @@ import h5py
 
 kitti_categories = kitti_utils.Parser.kitti_cat_names
 
+
 def parse_filename(filename):
     match = re.search(r'(.*)/\d{4}_\d\d_\d\d/(\d{4}_\d\d_\d\d)_drive_(\d{4})_sync/tracklet_labels.xml', os.path.abspath(filename))
     basedir = match.group(1)
@@ -18,79 +19,27 @@ def parse_filename(filename):
     drive   = match.group(3)
     return (basedir, date, drive)
 
-total_a = 0
-total_b = 0
-
 def generate_top_views_with_boxes(
     cur_data,
     cur_boxes,
     pred_boxes,
     cur_test_filename,
-    MODEL_STORAGE_PATH):
+    MODEL_STORAGE_PATH,
+    IMAGE_STORAGE_PATH="./images",
+    idx=0):
     print("GT A,B,l", cur_boxes[0])
     print("Pr A,B,l", pred_boxes[0])
-    return
-
-def generate_top_views(
-    cur_data, 
-    cur_seg, 
-    pred_seg_res, 
-    cur_test_filename,
-    MODEL_STORAGE_PATH,
-    begidx,
-    num_parts):
-    global total_a, total_b
-    print("GT mean:", np.mean(cur_data[0,:,0]),np.mean(cur_data[0,:,1]),np.mean(cur_data[0,:,2]))
-    print("GT   Object points:", np.sum(cur_seg), "eg:", cur_seg[0][0:2048:256])
-    print(np.bincount(cur_seg[0], minlength=num_parts))
-    print("Pred Object points:", np.sum(pred_seg_res), pred_seg_res[0][0:2048:256])
-    print(np.bincount(pred_seg_res[0], minlength=num_parts))
-    hist_gt = np.bincount(cur_seg.flatten())
-    total_a += hist_gt[0]
-    total_b += hist_gt[1]
-    print(total_a, "/", total_b, total_a+total_b)
-
-    X_RANGE = (  0., 70.)
-    Y_RANGE = (-40., 40.)
-    Z_RANGE = ( -2.,  2.)
-    RES = 0.2
-
-    Y_PIXELS = int((Y_RANGE[1]-Y_RANGE[0]) / RES)
-    X_PIXELS = int((X_RANGE[1]-X_RANGE[0]) / RES)
-
-    top_view = np.zeros(shape=(X_PIXELS, Y_PIXELS, 3),dtype=np.float32)
-    
-    # convert from lidar x y to top view X Y 
-    def toY(y):
-        return int((y-Y_RANGE[0]) // RES)
-    def toX(x):
-        return int((X_PIXELS-1) - (x-X_RANGE[0]) // RES)
-    def toXY(x,y):
-        return (toY(y), toX(x))
-
     (basedir, date, drive) = parse_filename(cur_test_filename)
+    print("Dummy loading", basedir, date, drive)
+    parser = kitti_utils.Parser(basedir, date, drive)
+    if not os.path.exists(IMAGE_STORAGE_PATH):
+        os.mkdir(IMAGE_STORAGE_PATH)
 
-    for (point_batch, label_batch, prediction_batch) in zip(cur_data, cur_seg, pred_seg_res):
-        for (point, label, prediction) in zip(point_batch, label_batch, prediction_batch):
-            x, y = point[0], point[1]
-            if (x >= X_RANGE[0]) and (x <= X_RANGE[1]) and (y >= Y_RANGE[0]) and (y <= Y_RANGE[1]):
-                if (label == prediction):
-                    if label == 1:
-                        C = (1.,  1.,   1.)
-                    else:
-                        C = (0.5, 0.5, 0.5)
-                else:
-                    if (label == 0) and (prediction == 1):
-                        C = (1., 0.,  0.)
-                    else:
-                        C = (1., 0.,  1.)
+    img = parser.top_view(0, with_boxes = False, lidar_override = np.squeeze(cur_data, axis=0), abl_overrides=np.concatenate((cur_boxes, pred_boxes), axis=0))
+    imsave('{}/GTvsPred{}-{}.png'.format(IMAGE_STORAGE_PATH, drive, idx), img)
 
-                top_view[toXY(x,y)[::-1] ] = C
-
-        imsave('{}/drive{}-{}.png'.format(MODEL_STORAGE_PATH, drive, begidx), top_view)
-        begidx += 1
-        top_view[:,:] = (0,0,0)
     return
+
 
 def shuffle_data(data, labels):
     """ Shuffle data and labels.
@@ -125,16 +74,15 @@ def load_h5_data_label_seg(h5_filename, MAX_POINTS, MIN_POINTS=20, IMAGE_STORAGE
             np.random.shuffle(point_cloud)    
         assert data.shape[1:3] == (MAX_POINTS,3)
 
-        if True:
+        if False:
             (basedir, date, drive) = parse_filename(h5_filename)
             print("Dummy loading", basedir, date, drive)
             parser = kitti_utils.Parser(basedir, date, drive)
             ii = 0
+            if not os.path.exists(IMAGE_STORAGE_PATH):
+                os.mkdir(IMAGE_STORAGE_PATH)
             for abl, lidar in zip(boxes, data):
-                if not os.path.exists(IMAGE_STORAGE_PATH):
-                    os.mkdir(IMAGE_STORAGE_PATH)
-
-                img = parser.top_view(0, with_boxes = False, lidar_override = lidar, abl_override=abl)
+                img = parser.top_view(0, with_boxes = False, lidar_override = lidar, abl_overrides=[abl])
                 imsave('{}/GT{}-{}.png'.format(IMAGE_STORAGE_PATH, drive, ii), img)
                 ii += 1
 

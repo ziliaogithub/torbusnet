@@ -113,7 +113,7 @@ def train():
                             staircase=True          # Stair-case or continuous decreasing
                             )
             '''
-            learning_rate = 1e-3 # tf.maximum(learning_rate, LEARNING_RATE_CLIP)
+            learning_rate = 5e-5 # tf.maximum(learning_rate, LEARNING_RATE_CLIP)
         
             #bn_momentum = tf.train.exponential_decay(
             #          BN_INIT_DECAY,
@@ -339,12 +339,14 @@ def train():
                         #code.interact(local=locals())
                         pass
 
-                    provider.generate_top_views_with_boxes(
-                        cur_data[begidx: endidx, ...],  # BxNx3
-                        cur_boxes[begidx: endidx, ...], # Bx5 (Ax,Ay,Bx,By,l)
-                        np.concatenate((bbox_A_pred_val, bbox_B_pred_val, bbox_l_pred_val), axis=1),
-                        cur_test_filename,
-                        MODEL_STORAGE_PATH)
+                    if (j < 10):
+                        provider.generate_top_views_with_boxes(
+                            cur_data[begidx: endidx, ...],  # BxNx3
+                            cur_boxes[begidx: endidx, ...], # Bx5 (Ax,Ay,Bx,By,l)
+                            np.concatenate((bbox_A_pred_val, bbox_B_pred_val, bbox_l_pred_val), axis=1),
+                            cur_test_filename,
+                            MODEL_STORAGE_PATH,
+                            idx=j)
 
                     #for shape_idx in range(begidx, endidx):
                     #    total_seen_per_cat[cur_labels[shape_idx]] += 1
@@ -359,23 +361,19 @@ def train():
                 total_bbox_B_loss /=  total_seen
                 total_bbox_l_loss /=  total_seen
 
-                '''
-                test_loss_sum, test_bbox_A_loss_sum, test_bbox_B_loss_sum, test_bbox_l_loss_sum, test_iou = sess.run(
-                    [total_test_loss_sum_op, bbox_A_testing_loss_sum_op, bbox_B_testing_loss_sum_op,  bbox_l_testing_loss_sum_op, 
-                                testing_iou_sum_op],
+                
+                test_loss_sum, test_bbox_A_loss_sum, test_bbox_B_loss_sum, test_bbox_l_loss_sum = sess.run(
+                    [total_test_loss_sum_op, bbox_A_testing_loss_sum_op, bbox_B_testing_loss_sum_op,  bbox_l_testing_loss_sum_op],
                                 feed_dict = {
                                 total_testing_loss_ph: total_loss, 
                                 bbox_A_testing_loss_ph: total_bbox_A_loss,
                                 bbox_B_testing_loss_ph: total_bbox_B_loss, 
-                                bbox_l_testing_loss_ph: total_bbox_l_loss, 
-                                testing_iou_ph: total_iou } )
+                                bbox_l_testing_loss_ph: total_bbox_l_loss } )
 
                 test_writer.add_summary(test_loss_sum, (epoch_num+1) * num_train_file-1)
                 test_writer.add_summary(test_bbox_A_loss_sum, (epoch_num+1) * num_train_file-1)
                 test_writer.add_summary(test_bbox_B_loss_sum, (epoch_num+1) * num_train_file-1)
                 test_writer.add_summary(test_bbox_l_loss_sum, (epoch_num+1) * num_train_file-1)
-                test_writer.add_summary(test_iou, (epoch_num+1) * num_train_file-1)
-                '''
 
                 printout(flog, '\tTesting Total Mean_loss: %f' % total_loss)
                 printout(flog, '\t\tTesting A box loss: %f' % total_bbox_A_loss)
