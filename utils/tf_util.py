@@ -331,7 +331,7 @@ def fully_connected(inputs,
   with tf.variable_scope(scope) as sc:
     num_input_units = inputs.get_shape()[-1].value
     #num_input_units = tf.shape(inputs)[-1]
-    print("niu", inputs.get_shape())
+
     weights = _variable_with_weight_decay('weights',
                                           shape=[num_input_units, num_outputs],
                                           use_xavier=use_xavier,
@@ -486,7 +486,7 @@ def batch_norm_template(inputs, is_training, scope, moments_dims, bn_decay):
     def mean_var_with_update():
       with tf.control_dependencies([ema_apply_op]):
         return tf.identity(batch_mean), tf.identity(batch_var)
-    
+
     # ema.average returns the Variable holding the average of var.
     mean, var = tf.cond(is_training,
                         mean_var_with_update,

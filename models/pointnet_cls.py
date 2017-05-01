@@ -10,14 +10,15 @@ import tf_util
 from transform_nets import input_transform_net, feature_transform_net
 
 def placeholder_inputs(batch_size, num_point):
-	pointclouds_pl = tf.placeholder(tf.float32, shape=(batch_size, num_point, 3))
-	labels_pl = tf.placeholder(tf.int32, shape=(batch_size))
+	pointclouds_pl = tf.placeholder(tf.float32, shape=(None, num_point, 3))
+	labels_pl = tf.placeholder(tf.int32, shape=(None))
 	return pointclouds_pl, labels_pl
 
 
 def get_model(point_cloud, is_training, bn_decay=None):
 	""" Classification PointNet, input is BxNx3, output Bx40 """
-	batch_size = point_cloud.get_shape()[0].value
+	#batch_size = point_cloud.get_shape()[0].value
+	batch_size = tf.shape(point_cloud)[0]
 	num_point = point_cloud.get_shape()[1].value
 	end_points = {}
 
@@ -38,7 +39,10 @@ def get_model(point_cloud, is_training, bn_decay=None):
 	with tf.variable_scope('transform_net2') as sc:
 		transform = feature_transform_net(net, is_training, bn_decay, K=64)
 	end_points['transform'] = transform
-	net_transformed = tf.matmul(tf.squeeze(net), transform)
+
+
+	net_transformed = tf.matmul(tf.squeeze(net, axis=[2]), transform)
+
 	net_transformed = tf.expand_dims(net_transformed, [2])
 
 	net = tf_util.conv2d(net_transformed, 64, [1,1],
@@ -54,11 +58,15 @@ def get_model(point_cloud, is_training, bn_decay=None):
 						 bn=True, is_training=is_training,
 						 scope='conv5', bn_decay=bn_decay)
 
+
 	# Symmetric function: max pooling
 	net = tf_util.max_pool2d(net, [num_point,1],
 							 padding='VALID', scope='maxpool')
 
-	net = tf.reshape(net, [batch_size, -1])
+
+	#net = tf.reshape(net, [batch_size, -1])
+	net = tf.squeeze(net, axis=[1,2])
+
 	net = tf_util.fully_connected(net, 512, bn=True, is_training=is_training,
 								  scope='fc1', bn_decay=bn_decay)
 	net = tf_util.dropout(net, keep_prob=0.7, is_training=is_training,
