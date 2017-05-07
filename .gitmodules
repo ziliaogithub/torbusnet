@@ -1,3 +1,6 @@
 [submodule "pykitti"]
 	path = pykitti
 	url = git@github.com:antorsae/pykitti.git
+[submodule "didi-competition"]
+	path = didi-competition
+	url = https://github.com/antorsae/didi-competition
