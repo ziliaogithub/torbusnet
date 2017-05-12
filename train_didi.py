@@ -19,16 +19,17 @@ parser = argparse.ArgumentParser()
 parser.add_argument('--gpu', type=int, default=0, help='GPU to use [default: GPU 0]')
 parser.add_argument('--model', default='pointnet_cls', help='Model name: pointnet_cls or pointnet_cls_basic [default: pointnet_cls]')
 parser.add_argument('--log_dir', default='log', help='Log dir [default: log]')
-parser.add_argument('--num_point', type=int, default=8192, help='Point Number [256/512/1024/2048] [default: 1024]')  #real number per lidar cycle is 32000, we will reduce to 16000
-parser.add_argument('--max_epoch', type=int, default=250, help='Epoch to run [default: 100]')
+parser.add_argument('--data_dir', default='../release2/Data-points-processed', help='Tracklets top dir')
+parser.add_argument('--num_point', type=int, default=16384, help='Point Number [256/512/1024/2048] [default: 1024]')  #real number per lidar cycle is 32000, we will reduce to 16000
+parser.add_argument('--max_epoch', type=int, default=500, help='Epoch to run [default: 100]')
 parser.add_argument('--batch_size', type=int, default=4, help='Batch Size during training [default: 32]')
 parser.add_argument('--learning_rate', type=float, default=0.001, help='Initial learning rate [default: 0.001]')
 parser.add_argument('--momentum', type=float, default=0.9, help='Initial learning rate [default: 0.9]')
 parser.add_argument('--optimizer', default='adam', help='adam or momentum [default: adam]')
 parser.add_argument('--decay_step', type=int, default=200000, help='Decay step for lr decay [default: 50000]')
 parser.add_argument('--decay_rate', type=float, default=0.7, help='Decay rate for lr decay [default: 0.8]')
-FLAGS = parser.parse_args()
 
+FLAGS = parser.parse_args()
 
 BATCH_SIZE = FLAGS.batch_size
 NUM_POINT = FLAGS.num_point
@@ -59,8 +60,7 @@ BN_DECAY_CLIP = 0.99
 
 HOSTNAME = socket.gethostname()
 
-
-DATA_DIR = '/Volumes/cine/release2/Data-points-processed'     #TODO: pass by argument
+DATA_DIR = FLAGS.data_dir     #TODO: pass by argument
 data = provider_didi.get_tracklets(os.path.join(DATA_DIR))
 # Shuffle data
 idxs = np.arange(0, len(data))
@@ -173,7 +173,7 @@ def train():
             eval_one_epoch(sess, ops, test_writer)
 
             # Save the variables to disk.
-            if epoch % 10 == 0:
+            if epoch % 1000 == 0:
                 save_path = saver.save(sess, os.path.join(LOG_DIR, "model.ckpt"))
                 log_string("Model saved in file: %s" % save_path)
 

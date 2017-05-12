@@ -33,8 +33,8 @@ def getDataFiles(list_dirname):
 
 
 def get_tracklets(directory):
-    root = "/Volumes/cine/release2/Data-points-processed"
-    trackle_list =  [[root,"1","10"]]#,[root,"1","13"],[root,"1","19"]] #TODO: read from csv
+    root = directory
+    trackle_list =  [[root,"1","10"], [root,"1","14_f"], [root,"1","11"], [root,"1","3"]]#,[root,"1","13"],[root,"1","19"]] #TODO: read from csv
     diditracklets = []
     for root,date,drive in trackle_list:
         diditracklet = DidiTracklet(root, date, drive)
@@ -42,7 +42,7 @@ def get_tracklets(directory):
 
     return diditracklets
 
-def loadDataFile(diditracklet,  num_points, num_frames=8):
+def loadDataFile(diditracklet,  num_points, num_frames=64):
     """
 
     :param diditracklet: an object of class Diditracklet
@@ -53,7 +53,7 @@ def loadDataFile(diditracklet,  num_points, num_frames=8):
     """
     data = []
     label = []
-    frames =  diditracklet.frames()[:num_frames]
+    frames =  diditracklet.frames()
     for frame in frames:
         data.append(diditracklet.get_lidar(frame, num_points)[:,:3])
         label.append(list(diditracklet.get_box_centroid(frame)[:2]))
