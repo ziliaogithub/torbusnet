@@ -11,7 +11,7 @@ from transform_nets import input_transform_net, feature_transform_net
 
 def placeholder_inputs(batch_size, num_point):
 	pointclouds_pl = tf.placeholder(tf.float32, shape=(None, num_point, 3))
-	labels_pl = tf.placeholder(tf.int32, shape=(None))
+	labels_pl = tf.placeholder(tf.float32, shape=(None,2))
 	return pointclouds_pl, labels_pl
 
 
@@ -22,10 +22,11 @@ def get_model(point_cloud, is_training, bn_decay=None):
 	num_point = point_cloud.get_shape()[1].value
 	end_points = {}
 
-	with tf.variable_scope('transform_net1') as sc:
-		transform = input_transform_net(point_cloud, is_training, bn_decay, K=3)
-	point_cloud_transformed = tf.matmul(point_cloud, transform)
-	input_image = tf.expand_dims(point_cloud_transformed, -1)
+	#with tf.variable_scope('transform_net1') as sc:
+	#	transform = input_transform_net(point_cloud, is_training, bn_decay, K=3)
+	#point_cloud_transformed = tf.matmul(point_cloud, transform)
+	#input_image = tf.expand_dims(point_cloud_transformed, -1)
+	input_image = tf.expand_dims(point_cloud, -1)
 
 	net = tf_util.conv2d(input_image, 64, [1,3],
 						 padding='VALID', stride=[1,1],
@@ -75,7 +76,7 @@ def get_model(point_cloud, is_training, bn_decay=None):
 								  scope='fc2', bn_decay=bn_decay)
 	net = tf_util.dropout(net, keep_prob=0.7, is_training=is_training,
 						  scope='dp2')
-	net = tf_util.fully_connected(net, 40, activation_fn=None, scope='fc3')
+	net = tf_util.fully_connected(net, 2, activation_fn=None, scope='fc3')
 
 	return net, end_points
 
@@ -97,6 +98,12 @@ def get_loss(pred, label, end_points, reg_weight=0.001):
 
 	return classify_loss + mat_diff_loss * reg_weight
 
+
+def get_loss_didi_regression(pred, label):
+	#loss = tf.reduce_sum(tf.sqrt(tf.pow(pred[0]-tf.to_float(label[0]), 2) + tf.pow(pred[1]-tf.to_float(label[1]), 2)))
+	loss = tf.nn.l2_loss(pred-label) / tf.to_float(tf.shape(pred)[0])
+
+	return loss
 
 if __name__=='__main__':
 	with tf.Graph().as_default():
