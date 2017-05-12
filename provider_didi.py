@@ -55,7 +55,7 @@ def loadDataFile(diditracklet,  num_points, num_frames=64):
     label = []
     frames =  diditracklet.frames()
     for frame in frames:
-        data.append(diditracklet.get_lidar(frame, num_points)[:,:3])
+        data.append(diditracklet.get_lidar(frame, num_points)[:,:4])
         label.append(list(diditracklet.get_box_centroid(frame)[:2]))
     return (np.array(data), np.array(label))
 

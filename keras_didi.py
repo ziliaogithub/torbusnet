@@ -11,6 +11,14 @@ from keras.optimizers import Adam
 from keras.layers.pooling import MaxPooling2D
 import os
 import numpy as np
+import sys
+import random
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+sys.path.append(BASE_DIR)
+sys.path.append(os.path.join(BASE_DIR, 'didi-competition/tracklets/python'))
+
+from diditracklet  import *
+
 
 parser = argparse.ArgumentParser()
 parser.add_argument('--data_dir', default='../release2/Data-points-processed', help='Tracklets top dir')
@@ -28,19 +36,14 @@ MAX_EPOCH = FLAGS.max_epoch
 BASE_LEARNING_RATE = FLAGS.learning_rate
 OPTIMIZER = FLAGS.optimizer
 DATA_DIR = FLAGS.data_dir
-data = provider_didi.get_tracklets(os.path.join(DATA_DIR))
-
-idxs = np.arange(0, len(data))
-np.random.shuffle(idxs)
-# Split into test and training set (20:80)
-split =  int(0.8*len(data))
-TRAIN_FILES =  data[:split]
-TEST_FILES  =  data[split:]
 
 # -----------------------------------------------------------------------------------------------------------------
 model = Sequential()
-model.add(Reshape(target_shape=(NUM_POINT, 3,1),input_shape=(NUM_POINT, 3)))
-model.add(Conv2D(filters=  64, kernel_size=(1,3), activation='relu'))
+model.add(Lambda(lambda x: x * (1/90.,1/90.,1/2., 1/127.5) - (0.,0.,0.,1.),
+            input_shape=(NUM_POINT, 4),
+            output_shape=(NUM_POINT, 4)))
+model.add(Reshape(target_shape=(NUM_POINT, 4,1),input_shape=(NUM_POINT, 4)))
+model.add(Conv2D(filters=  64, kernel_size=(1,4), activation='relu'))
 model.add(Conv2D(filters=  64, kernel_size=(1,1), activation='relu'))
 model.add(Conv2D(filters=  64, kernel_size=(1,1), activation='relu'))
 model.add(Conv2D(filters= 128, kernel_size=(1,1), activation='relu'))
@@ -51,30 +54,33 @@ model.add(Flatten())
 model.add(Dense(512, activation='relu'))
 model.add(Dense(256, activation='relu'))
 model.add(Dense(2, activation=None))
+model.add(Lambda(lambda x: x * (90.,90.)))
 model.compile(
     loss='mse',
 	optimizer=Adam(lr=1e-4))
 model.summary()
 
-
-
 # -----------------------------------------------------------------------------------------------------------------
+def gen(tracklets, batch_size, num_points):
+    lidars      = np.empty((batch_size, num_points, 4))
+    centroids   = np.empty((batch_size, 2))
+    items_ready = 0
+
+    while True:
+        random.shuffle(tracklets)
+        for tracklet in tracklets:
+            frames = tracklet.frames()
+            random.shuffle(frames)
+            for frame in frames:
+                lidars[items_ready]    = tracklet.get_lidar(frame, num_points)[:, :4]
+                centroids[items_ready] = tracklet.get_box_centroid(frame)[:2]
+                items_ready += 1
+                if items_ready == batch_size:
+                    yield(lidars, centroids)
+                    items_ready = 0
 
 
-#exception when len(data) == 1
-if split == 0:
-    TRAIN_FILES = TEST_FILES
+tracklets              = provider_didi.get_tracklets(os.path.join(DATA_DIR))
+total_number_of_frames = sum([len(t.frames()) for t in tracklets])
 
-train_file_idxs = np.arange(0, len(TRAIN_FILES))
-#np.random.shuffle(train_file_idxs)
-
-for fn in range(len(TRAIN_FILES)):
-    current_data, current_label = provider_didi.loadDataFile(TRAIN_FILES[train_file_idxs[fn]],NUM_POINT)
-    #current_data, current_label, _ = provider_didi.shuffle_data(current_data, current_label)
-
-    file_size = current_data.shape[0]
-    num_batches = int(file_size / BATCH_SIZE)
-
-    model.fit(current_data, current_label,
-              epochs=200,
-              batch_size=8)
+model.fit_generator(gen(tracklets, BATCH_SIZE, NUM_POINT), steps_per_epoch = total_number_of_frames // BATCH_SIZE, epochs = 200)
