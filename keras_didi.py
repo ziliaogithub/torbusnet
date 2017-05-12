@@ -64,21 +64,23 @@ model.summary()
 def gen(tracklets, batch_size, num_points):
     lidars      = np.empty((batch_size, num_points, 4))
     centroids   = np.empty((batch_size, 2))
-    items_ready = 0
+    i = 0
+
+    items = []
+    for tracklet in tracklets:
+        for frame in tracklet.frames():
+            items.append((tracklet, frame))
 
     while True:
-        random.shuffle(tracklets)
-        for tracklet in tracklets:
-            frames = tracklet.frames()
-            random.shuffle(frames)
-            for frame in frames:
-                lidars[items_ready]    = tracklet.get_lidar(frame, num_points)[:, :4]
-                centroids[items_ready] = tracklet.get_box_centroid(frame)[:2]
-                items_ready += 1
-                if items_ready == batch_size:
-                    yield(lidars, centroids)
-                    items_ready = 0
-
+        random.shuffle(items)
+        for item in items:
+            tracklet, frame = item
+            lidars[i]    = tracklet.get_lidar(frame, num_points)[:, :4]
+            centroids[i] = tracklet.get_box_centroid(frame)[:2]
+            i += 1
+            if i == batch_size:
+                yield (lidars, centroids)
+                i = 0
 
 tracklets              = provider_didi.get_tracklets(os.path.join(DATA_DIR))
 total_number_of_frames = sum([len(t.frames()) for t in tracklets])
