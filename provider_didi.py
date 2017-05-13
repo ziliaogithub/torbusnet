@@ -34,7 +34,8 @@ def getDataFiles(list_dirname):
 
 def get_tracklets(directory):
     root = directory
-    trackle_list =  [[root,"1","10"], [root,"1","14_f"], [root,"1","11"], [root,"1","3"]]#,[root,"1","13"],[root,"1","19"]] #TODO: read from csv
+    trackle_list =  [[root,"1","10"], [root,"1","14_f"], [root,"1","11"], [root,"1","3"], [root,"1","19"], [root,"1","20"], [root,"1","21_f"], [root,"1","4_f"],
+                     [root,"2","1"],  [root,"2","2"], [root,"2","13"], [root,"2","14_f"]]#,[root,"1","13"],[root,"1","19"]] #TODO: read from csv
     diditracklets = []
     for root,date,drive in trackle_list:
         diditracklet = DidiTracklet(root, date, drive)
