@@ -29,18 +29,20 @@ parser = argparse.ArgumentParser()
 parser.add_argument('--data_dir', default='../release2/Data-points-processed', help='Tracklets top dir')
 parser.add_argument('--num_point', type=int, default=27000, help='Number of lidar points to use')  #real number per lidar cycle is 32000, we will reduce to 16000
 parser.add_argument('--max_epoch', type=int, default=500, help='Epoch to run')
+parser.add_argument('--max_dist', type=float, default=40, help='Ignore obstacles beyond this distance (meters)')
 parser.add_argument('--batch_size', type=int, default=12, help='Batch Size during training')
 parser.add_argument('--learning_rate', type=float, default=1e-4, help='Initial learning rate')
 parser.add_argument('--optimizer', default='adam', help='adam or momentum ')
 
 FLAGS = parser.parse_args()
 
-BATCH_SIZE = FLAGS.batch_size
-NUM_POINT = FLAGS.num_point
-MAX_EPOCH = FLAGS.max_epoch
+BATCH_SIZE    = FLAGS.batch_size
+NUM_POINT     = FLAGS.num_point
+MAX_EPOCH     = FLAGS.max_epoch
 LEARNING_RATE = FLAGS.learning_rate
-OPTIMIZER = FLAGS.optimizer
-DATA_DIR = FLAGS.data_dir
+OPTIMIZER     = FLAGS.optimizer
+DATA_DIR      = FLAGS.data_dir
+MAX_DIST      = FLAGS.max_dist
 
 # -----------------------------------------------------------------------------------------------------------------
 def get_model(lr=LEARNING_RATE):
@@ -99,6 +101,22 @@ def gen(items, batch_size, num_points, training=True):
     lidars      = np.empty((batch_size, num_points, 4))
     centroids   = np.empty((batch_size, 3))
     dimensions  = np.empty((batch_size, 3))
+    weights     = np.ones((batch_size))
+
+    BINS = 40.
+
+    if training is True:
+        distances = []
+        for item in items:
+            tracklet, frame = item
+            centroid = tracklet.get_box_centroid(frame)[:3]
+            distance = np.linalg.norm(centroid[:2])  # only x y
+            distances.append(distance)
+
+        h_density, h_edges = np.histogram(distances, bins=int(BINS), range=(0, MAX_DIST), density=True)
+        h_count,   h_edges = np.histogram(distances, bins=int(BINS), range=(0, MAX_DIST), density=False)
+        print(h_density)
+        print(h_count)
 
     i = 0
 
@@ -119,28 +137,53 @@ def gen(items, batch_size, num_points, training=True):
             if training is True:
                 lidar        = point_utils.rotZ(lidar,    random_yaw)
                 centroid     = point_utils.rotZ(centroid, random_yaw)
+                # flip along x axis
+                if np.random.randint(2) == 1:
+                    lidar[:,0]  = -lidar[:,0]
+                    centroid[0] = -centroid[0]
+                # flip along y axis
+                if np.random.randint(2) == 1:
+                    lidar[:,1]  = -lidar[:,1]
+                    centroid[1] = -centroid[1]
+
+
             lidars[i]     = lidar
             centroids[i]  = centroid
             dimensions[i] = dimension
+            #print(distance)
+            #print(int(BINS*distance/MAX_DIST))
+            if training is True:
+                weights[i]    = (1. / h_density[int(BINS*distance/MAX_DIST)]) #/ np.sum(h_density)
+            #print( weights[i] )
 
             i += 1
             if i == batch_size:
-                yield (lidars, [centroids, dimensions])
+                if training is True:
+                    yield (lidars, [centroids, dimensions], [weights,weights])
+                else:
+                    yield (lidars, [centroids, dimensions])
+
                 i = 0
         # we should be done here
-        count, edges = np.histogram(distances, bins=30, range=(0,60.))
-        print()
-        print(count, edges)
+        #count, edges = np.histogram(distances, bins=BINS, range=(0,MAX_DIST))
+        #print()
+        #print(count, edges)
 
 def get_items(tracklets):
     items = []
     for tracklet in tracklets:
         for frame in tracklet.frames():
-            items.append((tracklet, frame))
+            centroid = tracklet.get_box_centroid(frame)[:3]
+            distance = np.linalg.norm(centroid[:2]) # only x y
+            if distance < MAX_DIST:
+                items.append((tracklet, frame))
     return items
 
 train_items    = get_items(provider_didi.get_tracklets(DATA_DIR, "train.txt"))
 validate_items = get_items(provider_didi.get_tracklets(DATA_DIR, "validate.txt"))
+
+print("Train items:    " + str(len(train_items)))
+print("Validate items: " + str(len(validate_items)))
 
 #from sklearn.model_selection import train_test_split
 #train_items, validation_items = train_test_split(items, test_size=0.20)
