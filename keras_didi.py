@@ -72,35 +72,20 @@ def get_model_functional(lr=LEARNING_RATE):
     p = Lambda(lambda x: x * (1 / 90., 1 / 90., 1 / 2., 1 / 127.5) - (0., 0., 0., 1.))(points)
     p = Reshape(target_shape=(NUM_POINT, 4, 1), input_shape=(NUM_POINT, 4))(p)
     p = Conv2D(filters=  64, kernel_size=(1, 4), activation='relu')(p)
-    p = Conv2D(filters=  64, kernel_size=(1, 1), activation='relu')(p)
-    # -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- --
-    # feature transform
-    K = 64
-    f = Conv2D(filters=  64, kernel_size=(1, 1), activation='relu')(p)
-    f = Conv2D(filters= 128, kernel_size=(1, 1), activation='relu')(f)
-    f = Conv2D(filters=1024, kernel_size=(1, 1), activation='relu')(f)
-    f = MaxPooling2D(pool_size=(NUM_POINT, 1), strides=None, padding='valid')(f)
-    f = Flatten()(f)
-    f = Dense(512, activation='relu')(f)
-    f = Dense(256, activation='relu')(f)
-    f = Dense(K * K, activation='relu')(f)
-    f = Reshape(target_shape=(K, K))(f)
-
-    p = Reshape(target_shape=(NUM_POINT, K))(p)
-    p = Dot(axes=(2))([p,f])
-    p = Reshape(target_shape=(NUM_POINT,1, K))(p)
-    # -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- --
-    p = Conv2D(filters=  64, kernel_size=(1, 1), activation='relu')(p)
     p = Conv2D(filters= 128, kernel_size=(1, 1), activation='relu')(p)
-    p = Conv2D(filters=1024, kernel_size=(1, 1), activation='relu')(p)
+    p = Conv2D(filters= 128, kernel_size=(1, 1), activation='relu')(p)
+    p = Conv2D(filters= 128, kernel_size=(1, 1), activation='relu')(p)
+    p = Conv2D(filters=2048, kernel_size=(1, 1), activation='relu')(p)
 
     p = MaxPooling2D(pool_size=(NUM_POINT, 1), strides=None, padding='valid')(p)
     p = Flatten()(p)
     p = Dense(512, activation='relu')(p)
     p = Dense(256, activation='relu')(p)
-    p = Dense(3, activation=None)(p)
-    centroids = Lambda(lambda x: x * (90., 90., 2.))(p)
-    model = Model(inputs=points, outputs=centroids)
+    c = Dense(3, activation=None)(p)
+    s = Dense(3, activation=None)(p)
+    centroids  = Lambda(lambda x: x * (90., 90., 2.))(c) # tx ty tz
+    dimensions = Lambda(lambda x: x * (2., 90., 90.))(s) # h w l
+    model = Model(inputs=points, outputs=[centroids, dimensions])
     model.compile(
         loss='mse',
         optimizer=Adam(lr=lr))
@@ -110,43 +95,59 @@ model = get_model_functional()
 model.summary()
 
 # -----------------------------------------------------------------------------------------------------------------
-def gen(items, batch_size, num_points, validation=False):
+def gen(items, batch_size, num_points, training=True):
     lidars      = np.empty((batch_size, num_points, 4))
     centroids   = np.empty((batch_size, 3))
+    dimensions  = np.empty((batch_size, 3))
+
     i = 0
 
     while True:
         random.shuffle(items)
+        distances = []
+
         for item in items:
             tracklet, frame = item
             random_yaw   = np.random.random_sample() * 2. * np.pi - np.pi
             lidar        = tracklet.get_lidar(frame, num_points)[:, :4]
             centroid     = tracklet.get_box_centroid(frame)[:3]
+            dimension    = tracklet.get_box_size()[:3]
 
-            if validation is False:
+            distance     = np.linalg.norm(centroid[:2]) # only x y
+            distances.append(distance)
+
+            if training is True:
                 lidar        = point_utils.rotZ(lidar,    random_yaw)
                 centroid     = point_utils.rotZ(centroid, random_yaw)
-            lidars[i]    = lidar
-            centroids[i] = centroid
+            lidars[i]     = lidar
+            centroids[i]  = centroid
+            dimensions[i] = dimension
 
             i += 1
             if i == batch_size:
-                yield (lidars, centroids)
+                yield (lidars, [centroids, dimensions])
                 i = 0
+        # we should be done here
+        count, edges = np.histogram(distances, bins=30, range=(0,60.))
+        print()
+        print(count, edges)
 
-tracklets = provider_didi.get_tracklets(os.path.join(DATA_DIR))
-items = []
-for tracklet in tracklets:
-    for frame in tracklet.frames():
-        items.append((tracklet, frame))
+def get_items(tracklets):
+    items = []
+    for tracklet in tracklets:
+        for frame in tracklet.frames():
+            items.append((tracklet, frame))
+    return items
 
-from sklearn.model_selection import train_test_split
+train_items    = get_items(provider_didi.get_tracklets(DATA_DIR, "train.txt"))
+validate_items = get_items(provider_didi.get_tracklets(DATA_DIR, "validate.txt"))
 
-train_items, validation_items = train_test_split(items, test_size=0.20)
+#from sklearn.model_selection import train_test_split
+#train_items, validation_items = train_test_split(items, test_size=0.20)
 
 model.fit_generator(
     gen(train_items, BATCH_SIZE, NUM_POINT),
     steps_per_epoch  = len(train_items) // BATCH_SIZE,
-    validation_data  = gen(validation_items, BATCH_SIZE, NUM_POINT, validation=True),
-    validation_steps = len(validation_items) // BATCH_SIZE,
+    validation_data  = gen(validate_items, BATCH_SIZE, NUM_POINT, training=False),
+    validation_steps = len(validate_items) // BATCH_SIZE,
     epochs = 2000)
