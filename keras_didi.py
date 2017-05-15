@@ -27,51 +27,32 @@ import point_utils
 
 parser = argparse.ArgumentParser()
 parser.add_argument('--data_dir', default='../release2/Data-points-processed', help='Tracklets top dir')
-parser.add_argument('--num_point', type=int, default=27000, help='Number of lidar points to use')  #real number per lidar cycle is 32000, we will reduce to 16000
+parser.add_argument('--num_point', type=int, default=24000, help='Number of lidar points to use')  #real number per lidar cycle is 32000, we will reduce to 16000
 parser.add_argument('--max_epoch', type=int, default=500, help='Epoch to run')
-parser.add_argument('--max_dist', type=float, default=40, help='Ignore obstacles beyond this distance (meters)')
+parser.add_argument('--max_dist', type=float, default=25, help='Ignore centroids beyond this distance (meters)')
+parser.add_argument('--max_dist_offset', type=float, default=3, help='Ignore centroids beyond this distance (meters)')
 parser.add_argument('--batch_size', type=int, default=12, help='Batch Size during training')
 parser.add_argument('--learning_rate', type=float, default=1e-4, help='Initial learning rate')
 parser.add_argument('--optimizer', default='adam', help='adam or momentum ')
 
 FLAGS = parser.parse_args()
 
-BATCH_SIZE    = FLAGS.batch_size
-NUM_POINT     = FLAGS.num_point
-MAX_EPOCH     = FLAGS.max_epoch
-LEARNING_RATE = FLAGS.learning_rate
-OPTIMIZER     = FLAGS.optimizer
-DATA_DIR      = FLAGS.data_dir
-MAX_DIST      = FLAGS.max_dist
+BATCH_SIZE     = FLAGS.batch_size
+NUM_POINT      = FLAGS.num_point
+MAX_EPOCH      = FLAGS.max_epoch
+LEARNING_RATE  = FLAGS.learning_rate
+OPTIMIZER      = FLAGS.optimizer
+DATA_DIR       = FLAGS.data_dir
+MAX_DIST       = FLAGS.max_dist
 
-# -----------------------------------------------------------------------------------------------------------------
-def get_model(lr=LEARNING_RATE):
-    model = Sequential()
-    model.add(Lambda(lambda x: x * (1 / 90., 1 / 90., 1 / 2., 1 / 127.5) - (0., 0., 0., 1.),
-                     input_shape=(NUM_POINT, 4),
-                     output_shape=(NUM_POINT, 4)))
-    model.add(Reshape(target_shape=(NUM_POINT, 4, 1), input_shape=(NUM_POINT, 4)))
-    model.add(Conv2D(filters=64, kernel_size=(1, 4), activation='relu'))
-    model.add(Conv2D(filters=64, kernel_size=(1, 1), activation='relu'))
-    model.add(Conv2D(filters=64, kernel_size=(1, 1), activation='relu'))
-    model.add(Conv2D(filters=128, kernel_size=(1, 1), activation='relu'))
-    model.add(Conv2D(filters=1024, kernel_size=(1, 1), activation='relu'))
-
-    model.add(MaxPooling2D(pool_size=(NUM_POINT, 1), strides=None, padding='valid'))
-    model.add(Flatten())
-    model.add(Dense(512, activation='relu'))
-    model.add(Dense(256, activation='relu'))
-    model.add(Dense(3, activation=None))
-    model.add(Lambda(lambda x: x * (90., 90., 2.)))
-    model.compile(
-        loss='mse',
-        optimizer=Adam(lr=lr))
-    return model
+MAX_LIDAR_DIST = MAX_DIST + FLAGS.max_dist_offset
 
 def get_model_functional(lr=LEARNING_RATE):
     points = Input(shape=(NUM_POINT, 4))
+    MAX_XY = 90.
+    MAX_Z  = 2.
 
-    p = Lambda(lambda x: x * (1 / 90., 1 / 90., 1 / 2., 1 / 127.5) - (0., 0., 0., 1.))(points)
+    p = Lambda(lambda x: x * (1. / MAX_XY, 1. / MAX_XY, 1. / MAX_Z, 1 / 127.5) - (0., 0., 0., 1.))(points)
     p = Reshape(target_shape=(NUM_POINT, 4, 1), input_shape=(NUM_POINT, 4))(p)
     p = Conv2D(filters=  64, kernel_size=(1, 4), activation='relu')(p)
     p = Conv2D(filters= 128, kernel_size=(1, 1), activation='relu')(p)
@@ -82,11 +63,13 @@ def get_model_functional(lr=LEARNING_RATE):
     p = MaxPooling2D(pool_size=(NUM_POINT, 1), strides=None, padding='valid')(p)
     p = Flatten()(p)
     p = Dense(512, activation='relu')(p)
+    p = Dropout(0.3)(p)
     p = Dense(256, activation='relu')(p)
+    p = Dropout(0.3)(p)
     c = Dense(3, activation=None)(p)
     s = Dense(3, activation=None)(p)
-    centroids  = Lambda(lambda x: x * (90., 90., 2.))(c) # tx ty tz
-    dimensions = Lambda(lambda x: x * (2., 90., 90.))(s) # h w l
+    centroids  = Lambda(lambda x: x * (MAX_XY, MAX_XY, MAX_Z))(c) # tx ty tz
+    dimensions = Lambda(lambda x: x * (MAX_Z, MAX_XY, MAX_XY))(s) # h w l
     model = Model(inputs=points, outputs=[centroids, dimensions])
     model.compile(
         loss='mse',
@@ -101,9 +84,8 @@ def gen(items, batch_size, num_points, training=True):
     lidars      = np.empty((batch_size, num_points, 4))
     centroids   = np.empty((batch_size, 3))
     dimensions  = np.empty((batch_size, 3))
-    weights     = np.ones((batch_size))
 
-    BINS = 40.
+    BINS = 25.
 
     if training is True:
         distances = []
@@ -117,57 +99,71 @@ def gen(items, batch_size, num_points, training=True):
         h_count,   h_edges = np.histogram(distances, bins=int(BINS), range=(0, MAX_DIST), density=False)
         print(h_density)
         print(h_count)
+        h_target = h_count
+        h_target[h_count > 0] = np.amin(h_count[h_count > 0])
+        h_current = h_target.copy()
+
+        print(h_target)
+    else:
+        skip = False
 
     i = 0
 
     while True:
         random.shuffle(items)
-        distances = []
 
         for item in items:
             tracklet, frame = item
-            random_yaw   = np.random.random_sample() * 2. * np.pi - np.pi
-            lidar        = tracklet.get_lidar(frame, num_points)[:, :4]
+
             centroid     = tracklet.get_box_centroid(frame)[:3]
             dimension    = tracklet.get_box_size()[:3]
-
             distance     = np.linalg.norm(centroid[:2]) # only x y
-            distances.append(distance)
 
             if training is True:
-                lidar        = point_utils.rotZ(lidar,    random_yaw)
-                centroid     = point_utils.rotZ(centroid, random_yaw)
-                # flip along x axis
-                if np.random.randint(2) == 1:
-                    lidar[:,0]  = -lidar[:,0]
-                    centroid[0] = -centroid[0]
-                # flip along y axis
-                if np.random.randint(2) == 1:
-                    lidar[:,1]  = -lidar[:,1]
-                    centroid[1] = -centroid[1]
 
+                _h = int(BINS * distance / MAX_DIST)
 
-            lidars[i]     = lidar
-            centroids[i]  = centroid
-            dimensions[i] = dimension
-            #print(distance)
-            #print(int(BINS*distance/MAX_DIST))
-            if training is True:
-                weights[i]    = (1. / h_density[int(BINS*distance/MAX_DIST)]) #/ np.sum(h_density)
-            #print( weights[i] )
-
-            i += 1
-            if i == batch_size:
-                if training is True:
-                    yield (lidars, [centroids, dimensions], [weights,weights])
+                if h_current[_h] == 0:
+                    skip = True
                 else:
-                    yield (lidars, [centroids, dimensions])
+                    skip = False
+                    h_current[_h] -= 1
+                    if np.sum(h_current) == 0:
+                        h_current = h_target.copy()
 
-                i = 0
-        # we should be done here
-        #count, edges = np.histogram(distances, bins=BINS, range=(0,MAX_DIST))
-        #print()
-        #print(count, edges)
+                    lidar = tracklet.get_lidar(frame, num_points, max_distance=MAX_LIDAR_DIST)[:, :4]
+
+                    # random rotation along Z axis
+                    random_yaw = np.random.random_sample() * 2. * np.pi - np.pi
+                    lidar        = point_utils.rotZ(lidar,    random_yaw)
+                    centroid     = point_utils.rotZ(centroid, random_yaw)
+                    # flip along x axis
+                    if np.random.randint(2) == 1:
+                        lidar[:,0]  = -lidar[:,0]
+                        centroid[0] = -centroid[0]
+                    # flip along y axis
+                    if np.random.randint(2) == 1:
+                        lidar[:,1]  = -lidar[:,1]
+                        centroid[1] = -centroid[1]
+
+                    # jitter cloud and intensity and move everything a random amount
+                    random_t = np.random.random_sample((4)) * np.array([MAX_DIST/BINS, MAX_DIST/BINS, 0.5, 0.]) \
+                               - np.array([MAX_DIST/(BINS*2), MAX_DIST/(BINS*2), 0.25, 0.])
+                    lidar        += random_t + np.random.random_sample((lidar.shape[0], 4)) * np.array([0.04, 0.04, 0.04, 4.]) - np.array([0.02, 0.02, 0.02, 2.])
+                    centroid[:3] += random_t[:3]
+
+            else:
+                lidar = tracklet.get_lidar(frame, num_points, max_distance=(MAX_DIST + 3.))[:, :4]
+
+            if skip is False:
+                lidars[i]     = lidar
+                centroids[i]  = centroid
+                dimensions[i] = dimension
+
+                i += 1
+                if i == batch_size:
+                    yield (lidars, [centroids, dimensions])
+                    i = 0
 
 def get_items(tracklets):
     items = []
