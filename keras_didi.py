@@ -13,6 +13,7 @@ from keras.activations import relu
 from keras.optimizers import Adam
 from keras.layers.pooling import MaxPooling2D
 from keras import backend as K
+from keras.callbacks import ModelCheckpoint
 
 import os
 import numpy as np
@@ -169,9 +170,10 @@ def get_items(tracklets):
     items = []
     for tracklet in tracklets:
         for frame in tracklet.frames():
+            state    = tracklet.get_state(frame)
             centroid = tracklet.get_box_centroid(frame)[:3]
             distance = np.linalg.norm(centroid[:2]) # only x y
-            if distance < MAX_DIST:
+            if (distance < MAX_DIST) and (state == 1):
                 items.append((tracklet, frame))
     return items
 
@@ -183,10 +185,13 @@ print("Validate items: " + str(len(validate_items)))
 
 #from sklearn.model_selection import train_test_split
 #train_items, validation_items = train_test_split(items, test_size=0.20)
+save_checkpoint = ModelCheckpoint(
+    "torbusnet-epoch{epoch: 02d}-loss{val_loss: .2f}.hdf5", monitor='val_loss', verbose=0, save_best_only=True, save_weights_only=False, mode='auto', period=1)
 
 model.fit_generator(
     gen(train_items, BATCH_SIZE, NUM_POINT),
     steps_per_epoch  = len(train_items) // BATCH_SIZE,
     validation_data  = gen(validate_items, BATCH_SIZE, NUM_POINT, training=False),
     validation_steps = len(validate_items) // BATCH_SIZE,
-    epochs = 2000)
+    epochs = 2000,
+    callbacks = [save_checkpoint])
