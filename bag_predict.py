@@ -6,6 +6,7 @@ import argparse
 import sensor_msgs.point_cloud2 as pc2
 import os
 import sys
+import time
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 sys.path.append(BASE_DIR)
@@ -19,6 +20,7 @@ parser = argparse.ArgumentParser(description='Predict position of obstacle and w
 parser.add_argument('-i', '--input-bag', type=str, required=True, help='input bag to process')
 parser.add_argument('-o', '--output-xml-filename', type=str, required=True, help='output xml')
 parser.add_argument('-m', '--model', help='path to hdf5 model')
+parser.add_argument('-l', '--lidar', action='store_true', help='sync frames to lidar instead of camera')
 parser.add_argument('-c', '--cpu', action='store_true', help='force CPU usage')
 
 args = parser.parse_args()
@@ -37,9 +39,21 @@ cloud = np.empty((POINT_LIMIT, 4), dtype=np.float32)
 collection = TrackletCollection()
 obs_tracklet = Tracklet(object_type='Car', l=0., w=0., h=0., first_frame=0)
 
+def get_pose(last_t):
+    pose = {}
+    pose['tx'] = last_t[0]
+    pose['ty'] = last_t[1]
+    pose['tz'] = last_t[2]
+    pose['rx'] = 0.
+    pose['ry'] = 0.
+    pose['rz'] = 0.
+    pose['status'] = 1
+    return pose
+
 last_t = np.zeros(3)
 for topic, msg, t in rosbag.Bag(args.input_bag).read_messages():
     if topic == '/velodyne_points':
+        time_start = time.time()
         timestamp = msg.header.stamp.to_nsec()
         points = 0
         for x, y, z, intensity, ring in pc2.read_points(msg):
@@ -47,6 +61,9 @@ for topic, msg, t in rosbag.Bag(args.input_bag).read_messages():
             points += 1
         lidar = DidiTracklet.filter_lidar(cloud[:points],  num_points = 24000, remove_capture_vehicle=True, max_distance = 25)
         last_t, last_s = model.predict(np.expand_dims(lidar, axis=0), batch_size = 1)
+        time_end = time.time()
+        print 'Inference time: %0.3f ms' % ((time_end - time_start) * 1000.0)
+
         last_t = np.squeeze(last_t, axis=0)
         last_s = np.squeeze(last_s, axis=0)
 
@@ -54,17 +71,15 @@ for topic, msg, t in rosbag.Bag(args.input_bag).read_messages():
         print(timestamp)
         print(points)
         print(lidar.shape)
+
+        if args.lidar:
+            print("Saving pose (lidar):", last_t)
+            obs_tracklet.poses.append(get_pose(last_t))
+
     if topic == '/image_raw':
-        pose = {}
-        pose['tx'] = last_t[0]
-        pose['ty'] = last_t[1]
-        pose['tz'] = last_t[2]
-        pose['rx'] = 0.
-        pose['ry'] = 0.
-        pose['rz'] = 0.
-        pose['status'] = 1
-        print("Saving pose:", last_t)
-        obs_tracklet.poses.append(pose)
+        if not args.lidar:
+            print("Saving pose (camera):", last_t)
+            obs_tracklet.poses.append(get_pose(last_t))
 
 obs_tracklet.h = last_s[0]
 obs_tracklet.w = last_s[1]
