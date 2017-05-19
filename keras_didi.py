@@ -89,6 +89,11 @@ def gen(items, batch_size, num_points, training=True):
     BINS = 25.
 
     if training is True:
+        # our training set is heavily unbalanced, so we are going to balance the histogram of x,y labels.
+        # since we will be using rotations we will build a target histogram based on distance so that
+        # the probability of a label ending up an a given x,y bucket is roughly the same
+        # we build a distance histogram target and since the number of points sampled from the a distance
+        # needs to grow proportionally with the radius of the circumference, we factor it in.
         distances = []
         for item in items:
             tracklet, frame = item
@@ -96,15 +101,28 @@ def gen(items, batch_size, num_points, training=True):
             distance = np.linalg.norm(centroid[:2])  # only x y
             distances.append(distance)
 
-        h_density, h_edges = np.histogram(distances, bins=int(BINS), range=(0, MAX_DIST), density=True)
-        h_count,   h_edges = np.histogram(distances, bins=int(BINS), range=(0, MAX_DIST), density=False)
-        print(h_density)
+        h_count,   _h_edges = np.histogram(distances, bins=int(BINS), range=(0, MAX_DIST), density=False)
+        h_edges = np.empty(_h_edges.shape[0]-1)
+        i = range(h_edges.shape[0])
+        for i in range(h_edges.shape[0]):
+            h_edges[i] = (_h_edges[i] + _h_edges[i+1] ) / 2.
+        h_edges[h_count == 0] = 0
+        print(h_edges)
         print(h_count)
-        h_target = h_count
-        h_target[h_count > 0] = np.amin(h_count[h_count > 0])
+        h_target = None
+        for i,r in enumerate(h_edges):
+            if r > 0:
+                k = h_count[i]/r
+                _h_target = np.array(h_edges * k, dtype=np.int32)
+                print(_h_target)
+                if np.all(h_count - _h_target >= 0):
+                    h_target = _h_target
+        if h_target is None:
+            print("WARNING: Could not find optimal balacing set, reverting to bad one")
+            h_target[h_count > 0] = np.amin(h_count[h_count > 0])
         h_current = h_target.copy()
 
-        print(h_target)
+        print("Target distance histogram", h_target)
     else:
         skip = False
 
@@ -183,10 +201,10 @@ validate_items = get_items(provider_didi.get_tracklets(DATA_DIR, "validate.txt")
 print("Train items:    " + str(len(train_items)))
 print("Validate items: " + str(len(validate_items)))
 
-#from sklearn.model_selection import train_test_split
+    #from sklearn.model_selection import train_test_split
 #train_items, validation_items = train_test_split(items, test_size=0.20)
 save_checkpoint = ModelCheckpoint(
-    "torbusnet-epoch{epoch: 02d}-loss{val_loss: .2f}.hdf5", monitor='val_loss', verbose=0, save_best_only=True, save_weights_only=False, mode='auto', period=1)
+    "torbusnet-epoch{epoch:02d}-loss{val_loss:.2f}.hdf5", monitor='val_loss', verbose=0, save_best_only=True, save_weights_only=False, mode='auto', period=1)
 
 model.fit_generator(
     gen(train_items, BATCH_SIZE, NUM_POINT),
