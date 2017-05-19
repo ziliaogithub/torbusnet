@@ -53,7 +53,8 @@ def get_model_functional(lr=LEARNING_RATE):
     MAX_XY = 90.
     MAX_Z  = 2.
 
-    p = Lambda(lambda x: x * (1. / MAX_XY, 1. / MAX_XY, 1. / MAX_Z, 1 / 127.5) - (0., 0., 0., 1.))(points)
+    #p = Lambda(lambda x: x * (1. / MAX_XY, 1. / MAX_XY, 1. / MAX_Z, 1 / 127.5) - (0., 0., 0., 1.))(points)
+    p = Lambda(lambda x: x * (1. / 90., 1. / 90., 1. / 2., 1 / 127.5) - (0., 0., 0., 1.))(points)
     p = Reshape(target_shape=(NUM_POINT, 4, 1), input_shape=(NUM_POINT, 4))(p)
     p = Conv2D(filters=  64, kernel_size=(1, 4), activation='relu')(p)
     p = Conv2D(filters= 128, kernel_size=(1, 1), activation='relu')(p)
@@ -69,8 +70,8 @@ def get_model_functional(lr=LEARNING_RATE):
     p = Dropout(0.3)(p)
     c = Dense(3, activation=None)(p)
     s = Dense(3, activation=None)(p)
-    centroids  = Lambda(lambda x: x * (MAX_XY, MAX_XY, MAX_Z))(c) # tx ty tz
-    dimensions = Lambda(lambda x: x * (MAX_Z, MAX_XY, MAX_XY))(s) # h w l
+    centroids  = Lambda(lambda x: x * (90., 90., 2.))(c) # tx ty tz
+    dimensions = Lambda(lambda x: x * (2., 90., 90.))(s) # h w l
     model = Model(inputs=points, outputs=[centroids, dimensions])
     model.compile(
         loss='mse',
