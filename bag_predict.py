@@ -31,7 +31,7 @@ if args.cpu:
 
 if args.model:
     model = load_model(args.model)
-
+    model.summary()
 
 POINT_LIMIT = 65536
 cloud = np.empty((POINT_LIMIT, 4), dtype=np.float32)
