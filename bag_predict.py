@@ -53,16 +53,19 @@ def get_pose(last_t):
 last_t = np.zeros(3)
 for topic, msg, t in rosbag.Bag(args.input_bag).read_messages():
     if topic == '/velodyne_points':
-        time_start = time.time()
+        time_prep_start = time.time()
         timestamp = msg.header.stamp.to_nsec()
         points = 0
         for x, y, z, intensity, ring in pc2.read_points(msg):
             cloud[points] = x, y, z, intensity
             points += 1
         lidar = DidiTracklet.filter_lidar(cloud[:points],  num_points = 24000, remove_capture_vehicle=True, max_distance = 25)
+        time_prep_end = time.time()
         last_t, last_s = model.predict(np.expand_dims(lidar, axis=0), batch_size = 1)
-        time_end = time.time()
-        print 'Inference time: %0.3f ms' % ((time_end - time_start) * 1000.0)
+        time_infe_end = time.time()
+        print 'Total time: %0.3f ms' % ((time_infe_end - time_prep_start) * 1000.0)
+        print '      Prep: %0.3f ms' % ((time_prep_end - time_prep_start) * 1000.0)
+        print ' Inference: %0.3f ms' % ((time_infe_end - time_prep_end)   * 1000.0)
 
         last_t = np.squeeze(last_t, axis=0)
         last_s = np.squeeze(last_s, axis=0)

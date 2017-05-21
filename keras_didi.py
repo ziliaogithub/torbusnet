@@ -93,7 +93,7 @@ else:
 
 if FLAGS.gpus > 1:
     model = multi_gpu.make_parallel(model, FLAGS.gpus )
-    BATCH_SIZE /= FLAGS.gpus
+    BATCH_SIZE *= FLAGS.gpus
 
 model.compile(loss='mse', optimizer=Adam(lr=LEARNING_RATE))
 
@@ -165,6 +165,8 @@ def gen(items, batch_size, num_points, training=True):
         skip = False
 
     i = 0
+    seen = 0
+    xyhist = np.zeros((600,600), dtype=np.float32)
 
     while True:
         random.shuffle(items)
@@ -221,6 +223,17 @@ def gen(items, batch_size, num_points, training=True):
                 if i == batch_size:
                     yield (lidars, [centroids, dimensions])
                     i = 0
+                    if training:
+                        xyhist[300+(centroids[:,1]*10.).astype(np.int32), 300+(centroids[:,0]*10.).astype(np.int32)] += 1
+                        seen += batch_size
+                        if seen >= batch_size * (len(items) // batch_size):
+                            import cv2
+                            #xyhist *=  255. / np.amax(xyhist)
+                            print(np.amin(xyhist[xyhist > 0]), np.amax(xyhist))
+                            cv2.imwrite('hist.png', xyhist * 255. / np.amax(xyhist))
+                            #xyhist[:,:] = 0.
+                            seen = 0
+
 
 def get_items(tracklets):
     items = []
