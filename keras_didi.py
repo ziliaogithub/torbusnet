@@ -87,9 +87,10 @@ def get_model_functional(classifier=False):
 
     else:
 
+        p = Dropout(0.3)(p)
         p = Dense(256, activation='relu')(p)
         p = Dropout(0.3)(p)
-        c = Dense(1, activation='relu')(p)
+        c = Dense(1, activation='sigmoid')(p)
 
         model = Model(inputs=points, outputs=c)
     return model
@@ -117,6 +118,8 @@ def gen(items, batch_size, num_points, training=True, classifier=False):
     lidars      = np.empty((batch_size, num_points, 4))
     centroids   = np.empty((batch_size, 3))
     dimensions  = np.empty((batch_size, 3))
+
+    classifications = np.empty((batch_size,1), dtype=np.int32)
 
     BINS = 25.
 
@@ -227,28 +230,68 @@ def gen(items, batch_size, num_points, training=True, classifier=False):
 
             if skip is False:
                 if classifier:
-                    
-                    #positive_detection = (np.random.randint(2) == 1)
-                    #if
-                    #lidar =
-                    pass
-                lidars[i]     = lidar
-                centroids[i]  = centroid
-                dimensions[i] = dimension
+                    OBS_DIAG   = 2.5
+                    ALLOWED_ERROR = 4.
+                    CLASS_DIST = OBS_DIAG + ALLOWED_ERROR
+                    classification = np.random.randint(2)
+                    num_points = lidar.shape[0]
+                    class_points = 0
+                    attempts = 0
+                    while class_points < 1:
+                        if classification == 0:
+                            # generate a non-detection by selecting an area where is no car:
+                            # find a random point within MAX_DIST of center that is at least CLASS_DIST + OBS_DIAG from vehicle
+                            random_center = np.array(centroid[:2])
+                            while ((np.linalg.norm(random_center - centroid[:2]) <= (CLASS_DIST + OBS_DIAG)) or
+                                (np.linalg.norm(random_center) >= MAX_DIST)):
+                                random_center = (np.random.random_sample(2) * 2. - np.ones(2)) * MAX_DIST
+                            classification_center = random_center
+                        else:
+                            # for detections we want to jitter the provided centroid:
+                            # put classification centroid within ALLOWED_ERROR of real centroid
+                            dist = ALLOWED_ERROR + 1.
+                            while dist > ALLOWED_ERROR:
+                                classification_center = centroid[:2] + (2 * np.random.random_sample(2) - np.ones(
+                                    2)) * ALLOWED_ERROR
+                                dist = np.linalg.norm(centroid[:2] - classification_center)
+                        class_lidar = lidar.copy()
+                        class_lidar[:, :2] -= classification_center
+                        class_lidar  = class_lidar[( (class_lidar[:,0] ** 2) + (class_lidar[:,1] ** 2) ) <= (CLASS_DIST ** 2)]
+                        class_points = class_lidar.shape[0]
+                        attempts += 1
+                        #if attempts > 2:
+                        #    print(classification, classification_center, class_points, tracklet.xml_path, frame)
 
-                i += 1
-                if i == batch_size:
-                    yield (lidars, [centroids, dimensions])
-                    i = 0
-                    if training:
-                        xyhist[300+(centroids[:,1]*10.).astype(np.int32), 300+(centroids[:,0]*10.).astype(np.int32)] += 1
-                        seen += batch_size
-                        if seen >= batch_size * (len(items) // batch_size):
-                            import cv2
-                            #xyhist *=  255. / np.amax(xyhist)
-                            #print(np.amin(xyhist[xyhist > 0]), np.amax(xyhist))
-                            cv2.imwrite('hist.png', xyhist * 255. / np.amax(xyhist))
-                            seen = 0
+                    # random rotate so we see all yaw equally
+                    random_yaw   = (np.random.random_sample() * 2. - 1.) * np.pi
+                    class_lidar        = point_utils.rotZ(class_lidar, random_yaw)
+                    lidar_size = class_lidar.shape[0]
+                    class_lidar = np.concatenate((class_lidar, class_lidar[np.random.choice(lidar_size, size=num_points - lidar_size, replace=True)]), axis=0)
+
+                    lidars[i] = class_lidar
+                    classifications[i] = classification
+                    i += 1
+                    if i == batch_size:
+                        yield (lidars, classifications)
+                        i = 0
+                        #print(classifications)
+
+                else: # regression
+                    lidars[i]     = lidar
+                    centroids[i]  = centroid
+                    dimensions[i] = dimension
+
+                    i += 1
+                    if i == batch_size:
+                        yield (lidars, [centroids, dimensions])
+                        i = 0
+                        if training:
+                            xyhist[300+(centroids[:,1]*10.).astype(np.int32), 300+(centroids[:,0]*10.).astype(np.int32)] += 1
+                            seen += batch_size
+                            if seen >= batch_size * (len(items) // batch_size):
+                                import cv2
+                                cv2.imwrite('hist.png', xyhist * 255. / np.amax(xyhist))
+                                seen = 0
 
 
 def get_items(tracklets):
@@ -270,12 +313,14 @@ print("Validate items: " + str(len(validate_items)))
 
 if CLASSIFIER:
     postfix = "classifier"
+    metric  = "-acc{val_acc:.4f}"
 else:
     postfix = "regressor"
+    metric  = "-loss{val_loss:.2f}"
 
 save_checkpoint = ModelCheckpoint(
-    "torbusnet-"+postfix+"-epoch{epoch:02d}-loss{val_loss:.2f}.hdf5",
-    monitor='val_loss',
+    "torbusnet-"+postfix+"-epoch{epoch:02d}"+metric+".hdf5",
+    monitor='val_acc' if CLASSIFIER else 'val_loss',
     verbose=0,  save_best_only=True, save_weights_only=False, mode='auto', period=1)
 
 reduce_lr = ReduceLROnPlateau(monitor='loss', factor=0.5, patience=50, min_lr=5e-7, epsilon = 0.2, cooldown = 10)
