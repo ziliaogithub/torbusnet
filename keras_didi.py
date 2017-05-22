@@ -10,11 +10,12 @@ from keras.layers.core import Dense, Activation, Flatten, Lambda, Dropout, Resha
 from keras.layers.convolutional import Conv2D, Cropping2D, AveragePooling2D
 from keras.layers.pooling import GlobalMaxPooling2D
 from keras.activations import relu
-from keras.optimizers import Adam
+from keras.optimizers import Adam, Nadam
 from keras.layers.pooling import MaxPooling2D
 from keras import backend as K
 from keras.callbacks import ModelCheckpoint, ReduceLROnPlateau
 from keras.models import load_model
+from torbus_layers import TorbusMaxPooling2D
 import multi_gpu
 
 import os
@@ -39,66 +40,80 @@ parser.add_argument('--learning_rate', type=float, default=1e-4, help='Initial l
 parser.add_argument('--optimizer', default='adam', help='adam or momentum ')
 parser.add_argument('-m', '--model', help='load hdf5 model (and continue training)')
 parser.add_argument('-g', '--gpus', type=int, default=1, help='Number of GPUs used for training')
+parser.add_argument('-c', '--classifier', action='store_true', help='Train classifier instead of regressor')
 
-FLAGS = parser.parse_args()
+args = parser.parse_args()
 
-BATCH_SIZE     = FLAGS.batch_size
-NUM_POINT      = FLAGS.num_point
-MAX_EPOCH      = FLAGS.max_epoch
-LEARNING_RATE  = FLAGS.learning_rate
-OPTIMIZER      = FLAGS.optimizer
-DATA_DIR       = FLAGS.data_dir
-MAX_DIST       = FLAGS.max_dist
+BATCH_SIZE     = args.batch_size
+NUM_POINT      = args.num_point
+MAX_EPOCH      = args.max_epoch
+LEARNING_RATE  = args.learning_rate
+OPTIMIZER      = args.optimizer
+DATA_DIR       = args.data_dir
+MAX_DIST       = args.max_dist
+CLASSIFIER     = args.classifier
+MAX_LIDAR_DIST = MAX_DIST + args.max_dist_offset
 
-MAX_LIDAR_DIST = MAX_DIST + FLAGS.max_dist_offset
-
-def get_model_functional():
+def get_model_functional(classifier=False):
     points = Input(shape=(NUM_POINT, 4))
-    MAX_XY = 90.
-    MAX_Z  = 2.
 
-    #p = Lambda(lambda x: x * (1. / MAX_XY, 1. / MAX_XY, 1. / MAX_Z, 1 / 127.5) - (0., 0., 0., 1.))(points)
     p = Lambda(lambda x: x * (1. / 25., 1. / 25., 1. / 3., 1. / 64.) - (0., 0., -0.5, 1.))(points)
     p = Reshape(target_shape=(NUM_POINT, 4, 1), input_shape=(NUM_POINT, 4))(p)
     p = Conv2D(filters=  64, kernel_size=(1, 4), activation='relu')(p)
+    po = p
     p = Conv2D(filters= 128, kernel_size=(1, 1), activation='relu')(p)
     p = Conv2D(filters= 128, kernel_size=(1, 1), activation='relu')(p)
     p = Conv2D(filters= 128, kernel_size=(1, 1), activation='relu')(p)
     p = Conv2D(filters=1024, kernel_size=(1, 1), activation='relu')(p)
 
+    #p  = TorbusMaxPooling2D(pool_size=(NUM_POINT, 1), strides=None, padding='valid')([p, po])
     p  = MaxPooling2D(pool_size=(NUM_POINT, 1), strides=None, padding='valid')(p)
 
     p  = Flatten()(p)
     p  = Dense(512, activation='relu')(p)
 
-    pc = Dense(256, activation='relu')(p)
-    pc = Dropout(0.3)(pc)
-    c = Dense(3, activation=None)(pc)
+    if classifier is False:
 
-    ps = Dense( 32, activation='relu')(p)
-    s = Dense(3, activation=None)(ps)
+        pc = Dense(256, activation='relu')(p)
+        pc = Dropout(0.3)(pc)
+        c = Dense(3, activation=None)(pc)
 
-    centroids  = Lambda(lambda x: x * (25.,25., 3.) - (0., 0., -1.5))(c) # tx ty tz
-    dimensions = Lambda(lambda x: x * ( 3.,25.,25.) - (-1.5, 0., 0.))(s) # h w l
-    model = Model(inputs=points, outputs=[centroids, dimensions])
+        ps = Dense( 32, activation='relu')(p)
+        s = Dense(3, activation=None)(ps)
+
+        centroids  = Lambda(lambda x: x * (25.,25., 3.) - (0., 0., -1.5))(c) # tx ty tz
+        dimensions = Lambda(lambda x: x * ( 3.,25.,25.) - (-1.5, 0., 0.))(s) # h w l
+        model = Model(inputs=points, outputs=[centroids, dimensions])
+
+    else:
+
+        p = Dense(256, activation='relu')(p)
+        p = Dropout(0.3)(p)
+        c = Dense(1, activation='relu')(p)
+
+        model = Model(inputs=points, outputs=c)
     return model
 
-if FLAGS.model:
-    print("Loading model " + FLAGS.model)
-    model = load_model(FLAGS.model)
+if args.model:
+    print("Loading model " + args.model)
+    model = load_model(args.model)
     model.summary()
 else:
-    model = get_model_functional()
+    model = get_model_functional(classifier = CLASSIFIER)
     model.summary()
 
-if FLAGS.gpus > 1:
-    model = multi_gpu.make_parallel(model, FLAGS.gpus )
-    BATCH_SIZE *= FLAGS.gpus
+if args.gpus > 1:
+    model = multi_gpu.make_parallel(model, args.gpus )
+    BATCH_SIZE *= args.gpus
 
-model.compile(loss='mse', optimizer=Adam(lr=LEARNING_RATE))
+if CLASSIFIER is False:
+    model.compile(loss='mse', optimizer=Nadam(lr=LEARNING_RATE))
+else:
+    model.compile(loss='binary_crossentropy',optimizer=Nadam(lr=LEARNING_RATE), metrics=['accuracy'])
+
 
 # -----------------------------------------------------------------------------------------------------------------
-def gen(items, batch_size, num_points, training=True):
+def gen(items, batch_size, num_points, training=True, classifier=False):
     lidars      = np.empty((batch_size, num_points, 4))
     centroids   = np.empty((batch_size, 3))
     dimensions  = np.empty((batch_size, 3))
@@ -116,11 +131,6 @@ def gen(items, batch_size, num_points, training=True):
         avgs /= len(items)
         mins /= len(items)
         maxs /= len(items)
-
-        print("Avgs:", avgs)
-        print("Mins:", mins)
-        print("Maxs:", maxs)
-
 
     if training is True:
 
@@ -193,7 +203,7 @@ def gen(items, batch_size, num_points, training=True):
                     lidar = tracklet.get_lidar(frame, num_points, max_distance=MAX_LIDAR_DIST)[:, :4]
 
                     # random rotation along Z axis
-                    random_yaw = np.random.random_sample() * 2. * np.pi - np.pi
+                    random_yaw   = (np.random.random_sample() * 2. - 1.) * np.pi
                     lidar        = point_utils.rotZ(lidar,    random_yaw)
                     centroid     = point_utils.rotZ(centroid, random_yaw)
                     # flip along x axis
@@ -206,15 +216,22 @@ def gen(items, batch_size, num_points, training=True):
                         centroid[1] = -centroid[1]
 
                     # jitter cloud and intensity and move everything a random amount
-                    random_t = np.random.random_sample((4)) * np.array([MAX_DIST/(BINS*2), MAX_DIST/(BINS*2), 0., 0.]) \
-                               - np.array([MAX_DIST/(BINS*4), MAX_DIST/(BINS*4), 0., 0.])
-                    lidar        += random_t + np.random.random_sample((lidar.shape[0], 4)) * np.array([0.04, 0.04, 0.02, 4.]) - np.array([0.02, 0.02, 0.01, 2.])
+                    random_t = np.zeros(4) # (np.random.random_sample((4)) - np.ones(4)/2. ) * np.array([MAX_DIST/BINS, MAX_DIST/BINS, 0., 0.])
+                    perturbation  = (np.random.random_sample((lidar.shape[0], 4)) - np.ones(4)/2. ) * np.array([0.1, 0.1, 0.1, 4.])
+
+                    lidar        += random_t + perturbation
                     centroid[:3] += random_t[:3]
 
             else:
-                lidar = tracklet.get_lidar(frame, num_points, max_distance=(MAX_DIST + 3.))[:, :4]
+                lidar = tracklet.get_lidar(frame, num_points, max_distance=MAX_LIDAR_DIST)[:, :4]
 
             if skip is False:
+                if classifier:
+                    
+                    #positive_detection = (np.random.randint(2) == 1)
+                    #if
+                    #lidar =
+                    pass
                 lidars[i]     = lidar
                 centroids[i]  = centroid
                 dimensions[i] = dimension
@@ -229,9 +246,8 @@ def gen(items, batch_size, num_points, training=True):
                         if seen >= batch_size * (len(items) // batch_size):
                             import cv2
                             #xyhist *=  255. / np.amax(xyhist)
-                            print(np.amin(xyhist[xyhist > 0]), np.amax(xyhist))
+                            #print(np.amin(xyhist[xyhist > 0]), np.amax(xyhist))
                             cv2.imwrite('hist.png', xyhist * 255. / np.amax(xyhist))
-                            #xyhist[:,:] = 0.
                             seen = 0
 
 
@@ -252,17 +268,22 @@ validate_items = get_items(provider_didi.get_tracklets(DATA_DIR, "validate.txt")
 print("Train items:    " + str(len(train_items)))
 print("Validate items: " + str(len(validate_items)))
 
-    #from sklearn.model_selection import train_test_split
-#train_items, validation_items = train_test_split(items, test_size=0.20)
-save_checkpoint = ModelCheckpoint(
-    "torbusnet-epoch{epoch:02d}-loss{val_loss:.2f}.hdf5", monitor='val_loss', verbose=0, save_best_only=True, save_weights_only=False, mode='auto', period=1)
+if CLASSIFIER:
+    postfix = "classifier"
+else:
+    postfix = "regressor"
 
-reduce_lr = ReduceLROnPlateau(monitor='loss', factor=0.5, patience=50, min_lr=1e-6, epsilon = 0.2, cooldown = 10)
+save_checkpoint = ModelCheckpoint(
+    "torbusnet-"+postfix+"-epoch{epoch:02d}-loss{val_loss:.2f}.hdf5",
+    monitor='val_loss',
+    verbose=0,  save_best_only=True, save_weights_only=False, mode='auto', period=1)
+
+reduce_lr = ReduceLROnPlateau(monitor='loss', factor=0.5, patience=50, min_lr=5e-7, epsilon = 0.2, cooldown = 10)
 
 model.fit_generator(
-    gen(train_items, BATCH_SIZE, NUM_POINT),
+    gen(train_items, BATCH_SIZE, NUM_POINT, classifier=CLASSIFIER),
     steps_per_epoch  = len(train_items) // BATCH_SIZE,
-    validation_data  = gen(validate_items, BATCH_SIZE, NUM_POINT, training=False),
+    validation_data  = gen(validate_items, BATCH_SIZE, NUM_POINT, training=False, classifier=CLASSIFIER),
     validation_steps = len(validate_items) // BATCH_SIZE,
     epochs = 2000,
     callbacks = [save_checkpoint, reduce_lr])

@@ -56,14 +56,21 @@ for topic, msg, t in rosbag.Bag(args.input_bag).read_messages():
         time_prep_start = time.time()
         timestamp = msg.header.stamp.to_nsec()
         points = 0
+#        xcloud = np.empty((msg.width, 5), dtype=np.float32)
+#        print(xcloud.__dict__)
+#        xcloud._numpy_ndarray__internals__['data'] = msg.data
+#        xcloud.__internals__.strides = (22,4)
+        fmt = '<fffxxxxfH'
         for x, y, z, intensity, ring in pc2.read_points(msg):
             cloud[points] = x, y, z, intensity
             points += 1
-        lidar = DidiTracklet.filter_lidar(cloud[:points],  num_points = 24000, remove_capture_vehicle=True, max_distance = 25)
+        time_prep_generator_end = time.time()
+        lidar = DidiTracklet.filter_lidar(cloud[:points],  num_points = 24000, remove_capture_vehicle=True, max_distance = 25, print_time = True)
         time_prep_end = time.time()
         last_t, last_s = model.predict(np.expand_dims(lidar, axis=0), batch_size = 1)
         time_infe_end = time.time()
         print 'Total time: %0.3f ms' % ((time_infe_end - time_prep_start) * 1000.0)
+        print ' Generator: %0.3f ms' % ((time_prep_generator_end - time_prep_start) * 1000.0)
         print '      Prep: %0.3f ms' % ((time_prep_end - time_prep_start) * 1000.0)
         print ' Inference: %0.3f ms' % ((time_infe_end - time_prep_end)   * 1000.0)
 
