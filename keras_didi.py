@@ -32,6 +32,7 @@ import point_utils
 parser = argparse.ArgumentParser()
 parser.add_argument('--data_dir', default='../release2/Data-points-processed', help='Tracklets top dir')
 parser.add_argument('--num_point', type=int, default=24000, help='Number of lidar points to use')  #real number per lidar cycle is 32000, we will reduce to 16000
+parser.add_argument('--classification_points', type=int, default=2048, help='Number of lidar points to use')  #real number per lidar cycle is 32000, we will reduce to 16000
 parser.add_argument('--max_epoch', type=int, default=5000, help='Epoch to run')
 parser.add_argument('--max_dist', type=float, default=25, help='Ignore centroids beyond this distance (meters)')
 parser.add_argument('--max_dist_offset', type=float, default=3, help='Ignore centroids beyond this distance (meters)')
@@ -51,51 +52,64 @@ MAX_DIST       = args.max_dist
 CLASSIFIER     = args.classifier
 MAX_LIDAR_DIST = MAX_DIST + args.max_dist_offset
 
+REGRESSION_POINTS = NUM_POINT
+CLASSIFICATION_POINTS = args.classification_points
+
 assert args.gpus  == len(args.batch_size)
 
-def get_model_functional(classifier=False):
-    points = Input(shape=(NUM_POINT, 4))
+def get_model_regression():
+    points = Input(shape=(REGRESSION_POINTS, 4))
 
     p = Lambda(lambda x: x * (1. / 25., 1. / 25., 1. / 3., 1. / 64.) - (0., 0., -0.5, 1.))(points)
-    p = Reshape(target_shape=(NUM_POINT, 4, 1), input_shape=(NUM_POINT, 4))(p)
+    p = Reshape(target_shape=(REGRESSION_POINTS, 4, 1), input_shape=(REGRESSION_POINTS, 4))(p)
     p = Conv2D(filters=  64, kernel_size=(1, 4), activation='relu')(p)
     po = p
-    p = Conv2D(filters= 128, kernel_size=(16, 1), dilation_rate = (2,1), activation='relu')(p)
-    p = Conv2D(filters= 128, kernel_size=(16, 1), dilation_rate = (2,1), activation='relu')(p)
-    if classifier is False:
-        p = Conv2D(filters=128, kernel_size=(16, 1), dilation_rate = (2,1), activation='relu')(p)
-        p = Conv2D(filters=1024, kernel_size=(16, 1), dilation_rate = (2,1), activation='relu')(p)
-    else:
-        p = Conv2D(filters=128, kernel_size=(1, 1), activation='relu')(p)
-        p = Conv2D(filters=1024, kernel_size=(1, 1), activation='relu')(p)
+    p = Conv2D(filters= 128, kernel_size=(1, 1), dilation_rate = (1,1), activation='relu')(p)
+    p = Conv2D(filters= 128, kernel_size=(1, 1), dilation_rate = (1,1), activation='relu')(p)
+    p = Conv2D(filters= 128, kernel_size=(1, 1), dilation_rate = (1,1), activation='relu')(p)
+    p = Conv2D(filters=1024, kernel_size=(1, 1), dilation_rate = (1,1), activation='relu')(p)
 
     #p  = TorbusMaxPooling2D(pool_size=(NUM_POINT, 1), strides=None, padding='valid')([p, po])
-    p  = MaxPooling2D(pool_size=(NUM_POINT-120, 1), strides=None, padding='valid')(p)
+    p  = MaxPooling2D(pool_size=(REGRESSION_POINTS, 1), strides=None, padding='valid')(p)
 
     p  = Flatten()(p)
     p  = Dense(512, activation='relu')(p)
 
-    if classifier is False:
+    pc = Dense(256, activation='relu')(p)
+    pc = Dropout(0.3)(pc)
+    c = Dense(3, activation=None)(pc)
 
-        pc = Dense(256, activation='relu')(p)
-        pc = Dropout(0.3)(pc)
-        c = Dense(3, activation=None)(pc)
+    ps = Dense( 32, activation='relu')(p)
+    s = Dense(3, activation=None)(ps)
 
-        ps = Dense( 32, activation='relu')(p)
-        s = Dense(3, activation=None)(ps)
+    centroids  = Lambda(lambda x: x * (25.,25., 3.) - (0., 0., -1.5))(c) # tx ty tz
+    dimensions = Lambda(lambda x: x * ( 3.,25.,25.) - (-1.5, 0., 0.))(s) # h w l
+    model = Model(inputs=points, outputs=[centroids, dimensions])
+    return model
 
-        centroids  = Lambda(lambda x: x * (25.,25., 3.) - (0., 0., -1.5))(c) # tx ty tz
-        dimensions = Lambda(lambda x: x * ( 3.,25.,25.) - (-1.5, 0., 0.))(s) # h w l
-        model = Model(inputs=points, outputs=[centroids, dimensions])
+def get_model_classification():
+    points = Input(shape=(CLASSIFICATION_POINTS, 4))
 
-    else:
+    p = Lambda(lambda x: x * (1. / 25., 1. / 25., 1. / 3., 1. / 64.) - (0., 0., -0.5, 1.))(points)
+    p = Reshape(target_shape=(CLASSIFICATION_POINTS, 4, 1), input_shape=(CLASSIFICATION_POINTS, 4))(p)
+    p = Conv2D(filters=  64, kernel_size=(1, 4), activation='relu')(p)
 
-        p = Dropout(0.3)(p)
-        p = Dense(256, activation='relu')(p)
-        p = Dropout(0.3)(p)
-        c = Dense(1, activation='sigmoid')(p)
+    p = Conv2D(filters= 128, kernel_size=(1, 1), activation='relu')(p)
+    p = Conv2D(filters= 128, kernel_size=(1, 1), activation='relu')(p)
+    p = Conv2D(filters= 128, kernel_size=(1, 1), activation='relu')(p)
+    p = Conv2D(filters=1024, kernel_size=(1, 1), activation='relu')(p)
 
-        model = Model(inputs=points, outputs=c)
+    p  = MaxPooling2D(pool_size=(CLASSIFICATION_POINTS, 1), strides=None, padding='valid')(p)
+
+    p  = Flatten()(p)
+    p  = Dense(512, activation='relu')(p)
+
+    p = Dropout(0.3)(p)
+    p = Dense(256, activation='relu')(p)
+    p = Dropout(0.3)(p)
+    c = Dense(1, activation='sigmoid')(p)
+
+    model = Model(inputs=points, outputs=c)
     return model
 
 if args.model:
@@ -103,7 +117,7 @@ if args.model:
     model = load_model(args.model)
     model.summary()
 else:
-    model = get_model_functional(classifier = CLASSIFIER)
+    model = get_model_classification() if args.classifier else get_model_regression()
     model.summary()
 
 if (args.gpus > 1) or (len(args.batch_size) > 1):
@@ -123,7 +137,7 @@ else:
 
 
 # -----------------------------------------------------------------------------------------------------------------
-def gen(items, batch_size, num_points, training=True, classifier=False):
+def gen(items, batch_size,lidar_points, num_points, training=True, classifier=False):
     lidars      = np.empty((batch_size, num_points, 4))
     centroids   = np.empty((batch_size, 3))
     dimensions  = np.empty((batch_size, 3))
@@ -136,7 +150,7 @@ def gen(items, batch_size, num_points, training=True, classifier=False):
         avgs = mins = maxs = 0.
         for item in items:
             tracklet, frame = item
-            lidar = tracklet.get_lidar(frame, num_points, max_distance=MAX_LIDAR_DIST)[:, :4]
+            lidar = tracklet.get_lidar(frame, lidar_points, max_distance=MAX_LIDAR_DIST)[:, :4]
             avgs += np.mean(lidar, axis=0)
             mins += np.amin(lidar, axis=0)
             maxs += np.amax(lidar, axis=0)
@@ -212,7 +226,7 @@ def gen(items, batch_size, num_points, training=True, classifier=False):
                     if np.sum(h_current) == 0:
                         h_current = h_target.copy()
 
-                    lidar = tracklet.get_lidar(frame, num_points, max_distance=MAX_LIDAR_DIST)[:, :4]
+                    lidar = tracklet.get_lidar(frame, lidar_points, max_distance=MAX_LIDAR_DIST)[:, :4]
 
                     # random rotation along Z axis
                     random_yaw   = (np.random.random_sample() * 2. - 1.) * np.pi
@@ -235,15 +249,15 @@ def gen(items, batch_size, num_points, training=True, classifier=False):
                     centroid[:3] += random_t[:3]
 
             else:
-                lidar = tracklet.get_lidar(frame, num_points, max_distance=MAX_LIDAR_DIST)[:, :4]
+                lidar = tracklet.get_lidar(frame, lidar_points, max_distance=MAX_LIDAR_DIST)[:, :4]
 
             if skip is False:
+
                 if classifier:
                     OBS_DIAG   = 2.5
                     ALLOWED_ERROR = 4.
                     CLASS_DIST = OBS_DIAG + ALLOWED_ERROR
                     classification = np.random.randint(2)
-                    num_points = lidar.shape[0]
                     class_points = 0
                     attempts = 0
                     while class_points < 1:
@@ -272,11 +286,10 @@ def gen(items, batch_size, num_points, training=True, classifier=False):
                         #    print(classification, classification_center, class_points, tracklet.xml_path, frame)
 
                     # random rotate so we see all yaw equally
-                    random_yaw   = (np.random.random_sample() * 2. - 1.) * np.pi
-                    class_lidar        = point_utils.rotZ(class_lidar, random_yaw)
-                    lidar_size = class_lidar.shape[0]
-                    class_lidar = np.concatenate((class_lidar, class_lidar[np.random.choice(lidar_size, size=num_points - lidar_size, replace=True)]), axis=0)
-
+                    random_yaw  = (np.random.random_sample() * 2. - 1.) * np.pi
+                    class_lidar = point_utils.rotZ(class_lidar, random_yaw)
+                    class_lidar = DidiTracklet.resample_lidar(class_lidar, num_points)
+                    #print(num_points)
                     lidars[i] = class_lidar
                     classifications[i] = classification
                     i += 1
@@ -334,10 +347,12 @@ save_checkpoint = ModelCheckpoint(
 
 reduce_lr = ReduceLROnPlateau(monitor='loss', factor=0.5, patience=50, min_lr=5e-7, epsilon = 0.2, cooldown = 10)
 
+nn_points = CLASSIFICATION_POINTS if args.classifier else REGRESSION_POINTS
+
 model.fit_generator(
-    gen(train_items, BATCH_SIZE, NUM_POINT, classifier=CLASSIFIER),
+    gen(train_items, BATCH_SIZE, num_points=nn_points, classifier=CLASSIFIER, lidar_points=REGRESSION_POINTS),
     steps_per_epoch  = len(train_items) // BATCH_SIZE,
-    validation_data  = gen(validate_items, BATCH_SIZE, NUM_POINT, training=False, classifier=CLASSIFIER),
+    validation_data  = gen(validate_items, BATCH_SIZE, num_points=nn_points, classifier=CLASSIFIER, lidar_points=REGRESSION_POINTS, training = False),
     validation_steps = len(validate_items) // BATCH_SIZE,
     epochs = 2000,
     callbacks = [save_checkpoint, reduce_lr])
