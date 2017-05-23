@@ -35,24 +35,23 @@ parser.add_argument('--num_point', type=int, default=24000, help='Number of lida
 parser.add_argument('--max_epoch', type=int, default=5000, help='Epoch to run')
 parser.add_argument('--max_dist', type=float, default=25, help='Ignore centroids beyond this distance (meters)')
 parser.add_argument('--max_dist_offset', type=float, default=3, help='Ignore centroids beyond this distance (meters)')
-parser.add_argument('--batch_size', type=int, default=12, help='Batch Size during training')
-parser.add_argument('--learning_rate', type=float, default=1e-4, help='Initial learning rate')
-parser.add_argument('--optimizer', default='adam', help='adam or momentum ')
+parser.add_argument('-b', '--batch_size', type=int, nargs='+', default=[12], help='Batch Size during training, or list of batch sizes for each GPU, e.g. -b 12,8')
+parser.add_argument('-l', '--learning_rate', type=float, default=1e-4, help='Initial learning rate')
 parser.add_argument('-m', '--model', help='load hdf5 model (and continue training)')
 parser.add_argument('-g', '--gpus', type=int, default=1, help='Number of GPUs used for training')
 parser.add_argument('-c', '--classifier', action='store_true', help='Train classifier instead of regressor')
 
 args = parser.parse_args()
 
-BATCH_SIZE     = args.batch_size
 NUM_POINT      = args.num_point
 MAX_EPOCH      = args.max_epoch
 LEARNING_RATE  = args.learning_rate
-OPTIMIZER      = args.optimizer
 DATA_DIR       = args.data_dir
 MAX_DIST       = args.max_dist
 CLASSIFIER     = args.classifier
 MAX_LIDAR_DIST = MAX_DIST + args.max_dist_offset
+
+assert args.gpus  == len(args.batch_size)
 
 def get_model_functional(classifier=False):
     points = Input(shape=(NUM_POINT, 4))
@@ -61,13 +60,17 @@ def get_model_functional(classifier=False):
     p = Reshape(target_shape=(NUM_POINT, 4, 1), input_shape=(NUM_POINT, 4))(p)
     p = Conv2D(filters=  64, kernel_size=(1, 4), activation='relu')(p)
     po = p
-    p = Conv2D(filters= 128, kernel_size=(1, 1), activation='relu')(p)
-    p = Conv2D(filters= 128, kernel_size=(1, 1), activation='relu')(p)
-    p = Conv2D(filters= 128, kernel_size=(1, 1), activation='relu')(p)
-    p = Conv2D(filters=1024, kernel_size=(1, 1), activation='relu')(p)
+    p = Conv2D(filters= 128, kernel_size=(16, 1), dilation_rate = (2,1), activation='relu')(p)
+    p = Conv2D(filters= 128, kernel_size=(16, 1), dilation_rate = (2,1), activation='relu')(p)
+    if classifier is False:
+        p = Conv2D(filters=128, kernel_size=(16, 1), dilation_rate = (2,1), activation='relu')(p)
+        p = Conv2D(filters=1024, kernel_size=(16, 1), dilation_rate = (2,1), activation='relu')(p)
+    else:
+        p = Conv2D(filters=128, kernel_size=(1, 1), activation='relu')(p)
+        p = Conv2D(filters=1024, kernel_size=(1, 1), activation='relu')(p)
 
     #p  = TorbusMaxPooling2D(pool_size=(NUM_POINT, 1), strides=None, padding='valid')([p, po])
-    p  = MaxPooling2D(pool_size=(NUM_POINT, 1), strides=None, padding='valid')(p)
+    p  = MaxPooling2D(pool_size=(NUM_POINT-120, 1), strides=None, padding='valid')(p)
 
     p  = Flatten()(p)
     p  = Dense(512, activation='relu')(p)
@@ -103,9 +106,15 @@ else:
     model = get_model_functional(classifier = CLASSIFIER)
     model.summary()
 
-if args.gpus > 1:
-    model = multi_gpu.make_parallel(model, args.gpus )
-    BATCH_SIZE *= args.gpus
+if (args.gpus > 1) or (len(args.batch_size) > 1):
+    if len(args.batch_size) == 1:
+        model = multi_gpu.make_parallel(model, args.gpus )
+        BATCH_SIZE = args.gpus * args.batch_size[0]
+    else:
+        BATCH_SIZE = sum(args.batch_size)
+        model = multi_gpu.make_parallel(model, args.gpus , splits=args.batch_size)
+else:
+    BATCH_SIZE = args.batch_size[0]
 
 if CLASSIFIER is False:
     model.compile(loss='mse', optimizer=Nadam(lr=LEARNING_RATE))
