@@ -17,7 +17,7 @@ import point_utils
 from generate_tracklet import *
 
 parser = argparse.ArgumentParser(description='Predict position of obstacle and write tracklet xml file.')
-parser.add_argument('-i', '--input-bag', type=str, required=True, help='input bag to process')
+parser.add_argument('-i', '--input-bag', default='../release2/Data-points/test/19_f2.bag', type=str, help='input bag to process')
 parser.add_argument('-o', '--output-xml-filename', type=str, required=True, help='output xml')
 parser.add_argument('-m', '--model', help='path to hdf5 model')
 parser.add_argument('-l', '--lidar', action='store_true', help='sync frames to lidar instead of camera')
@@ -32,6 +32,7 @@ if args.cpu:
 if args.model:
     model = load_model(args.model)
     model.summary()
+    nn_points = model.get_input_shape_at(0)[1]
 
 POINT_LIMIT = 65536
 cloud = np.empty((POINT_LIMIT, 4), dtype=np.float32)
@@ -65,8 +66,27 @@ for topic, msg, t in rosbag.Bag(args.input_bag).read_messages():
             cloud[points] = x, y, z, intensity
             points += 1
         time_prep_generator_end = time.time()
-        lidar = DidiTracklet.filter_lidar(cloud[:points],  num_points = 24000, remove_capture_vehicle=True, max_distance = 25, print_time = True)
+        lidar = DidiTracklet.filter_lidar(cloud[:points], remove_capture_vehicle=True, max_distance = 25)
         time_prep_end = time.time()
+        #lidar = DidiTracklet.resample_lidar(lidar, nn_points)
+
+        OBS_DIAG = 2.5
+        ALLOWED_ERROR = 10.
+        CLASS_DIST = OBS_DIAG + ALLOWED_ERROR
+
+        points_to_test = 1e100
+        while points_to_test > 0:
+            max_z_point = lidar[np.argmax(lidar[:,2])]
+            max_z_point[2] = 0
+            lidar_class = lidar.copy() - max_z_point
+            lidar_class = lidar_class[(lidar_class[:,0] ** 2 + lidar_class[:,1] ** 2) <= (CLASS_DIST ** 2)]
+            print(lidar_class.shape)
+            lidar_class = DidiTracklet.resample_lidar(lidar_class, nn_points)
+            print(max_z_point, model.predict(np.expand_dims(lidar_class, axis=0), batch_size=1))
+            lidar = lidar[(((lidar[:,0] - max_z_point[0]) ** 2) + ((lidar[:,1] - max_z_point[1]) ** 2)) >= (ALLOWED_ERROR ** 2)]
+            points_to_test = lidar.shape[0]
+
+        
         last_t, last_s = model.predict(np.expand_dims(lidar, axis=0), batch_size = 1)
         time_infe_end = time.time()
         print 'Total time: %0.3f ms' % ((time_infe_end - time_prep_start) * 1000.0)
