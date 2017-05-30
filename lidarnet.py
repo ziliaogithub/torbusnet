@@ -4,21 +4,29 @@ from keras.initializers import Constant, Zeros
 from keras.regularizers import l2, l1
 from keras.layers.normalization import BatchNormalization
 from keras.models import Sequential, Model, Input
-from keras.layers import Input, merge, Layer
+from keras.layers import Input, merge, Layer, Concatenate, Multiply
 from keras.layers.merge import dot, Dot, add
 from keras.layers.core import Dense, Activation, Flatten, Lambda, Dropout, Reshape
 from keras.layers.convolutional import Conv2D, Cropping2D, AveragePooling2D, Conv1D
 from keras.layers.pooling import GlobalMaxPooling2D
 from keras.activations import relu
-from keras.optimizers import Adam, Nadam, Adadelta
+from keras.optimizers import Adam, Nadam, Adadelta, SGD
 from keras.layers.pooling import MaxPooling2D
+from keras.layers.advanced_activations import PReLU, LeakyReLU, ELU
+from keras.optimizers import Adam, Nadam, SGD
+from keras.layers.pooling import MaxPooling2D, MaxPooling1D
+from keras.layers.local import LocallyConnected1D
 from keras import backend as K
 from keras.callbacks import ModelCheckpoint, ReduceLROnPlateau
 from keras.models import load_model
 from torbus_layers import TorbusMaxPooling2D
-from keras_contrib.layers import BatchRenormalization
+import tensorflow as tf
 
 import multi_gpu
+
+import matplotlib as mpl
+mpl.use('Agg')
+import matplotlib.pyplot as plt
 
 import os
 import numpy as np
@@ -51,11 +59,24 @@ DATA_DIR       = args.data_dir
 MAX_DIST       = args.max_dist
 #MAX_LIDAR_DIST = MAX_DIST + args.max_dist_offset
 
-RINGS = range(11,20)
-POINTS_PER_RING = 2048
+RINGS = range(11,21)
+CHANNELS = 2
+'''
+11	1539
+12	1890
+13	1951
+14	2072
+15	2092
+16	2171
+17	2165
+18	2163
+19	2110
+
+20	2151
+'''
+POINTS_PER_RING = 1024
 
 assert args.gpus  == len(args.batch_size)
-
 
 def get_dummy_model():
     # receptive field needs to be 1/5 of total to detect large objects close by (e.g. for 1024 -> 205)
@@ -92,7 +113,184 @@ def get_dummy_model():
     return model
 
 
+def angle_loss(angle_true, angle_pred):
+    print(angle_true.shape)
+    print(angle_pred.shape)
+
+    xx_true = K.cos(angle_true)
+    yy_true = K.sin(angle_true)
+
+    xx_pred = K.cos(angle_pred)
+    yy_pred = K.sin(angle_pred)
+    vector_true = K.concatenate([xx_true, yy_true], axis=-1)
+    vector_pred = K.concatenate([xx_pred, yy_pred], axis=-1)
+    print('vector_true', vector_true.shape)
+    print('vector_pred', vector_pred.shape)
+
+    return K.mean(K.square(vector_true - vector_pred), axis=-1)
+
 def get_model():
+    # receptive field needs to be 1/5 of total to detect large objects close by (e.g. for 1024 -> 205)
+    NRINGS = len(RINGS)
+    #ring_points = Input(shape=(RINGS, POINTS_PER_RING, 3)) # x y z
+
+    p0  =  r0 = Input(shape=(POINTS_PER_RING, CHANNELS)) # d i
+    p1  =  r1 = Input(shape=(POINTS_PER_RING, CHANNELS)) # d i
+    p2  =  r2 = Input(shape=(POINTS_PER_RING, CHANNELS)) # d i
+    p3  =  r3 = Input(shape=(POINTS_PER_RING, CHANNELS)) # d i
+    p4  =  r4 = Input(shape=(POINTS_PER_RING, CHANNELS)) # d i
+    p5  =  r5 = Input(shape=(POINTS_PER_RING, CHANNELS)) # d i
+    p6  =  r6 = Input(shape=(POINTS_PER_RING, CHANNELS)) # d i
+    p7  =  r7 = Input(shape=(POINTS_PER_RING, CHANNELS)) # d i
+    p8  =  r8 = Input(shape=(POINTS_PER_RING, CHANNELS)) # d i
+    p9  =  r9 = Input(shape=(POINTS_PER_RING, CHANNELS)) # d i
+
+
+
+    # assume d  90 max =>  90 -> 1, 0 -> -1
+    #        i 128 max => 128 -> 1, 0 -> -1
+
+    if CHANNELS == 2:
+        p0 =  Lambda(lambda x: x * (1/50. , 1. / 64.) - (0.5, 1.))(r0)
+        p1 =  Lambda(lambda x: x * (1/50. , 1. / 64.) - (0.5, 1.))(r1)
+        p2 =  Lambda(lambda x: x * (1/50. , 1. / 64.) - (0.5, 1.))(r2)
+        p3 =  Lambda(lambda x: x * (1/50. , 1. / 64.) - (0.5, 1.))(r3)
+        p4 =  Lambda(lambda x: x * (1/50. , 1. / 64.) - (0.5, 1.))(r4)
+        p5 =  Lambda(lambda x: x * (1/50. , 1. / 64.) - (0.5, 1.))(r5)
+        p6 =  Lambda(lambda x: x * (1/50. , 1. / 64.) - (0.5, 1.))(r6)
+        p7 =  Lambda(lambda x: x * (1/50. , 1. / 64.) - (0.5, 1.))(r7)
+        p8 =  Lambda(lambda x: x * (1/50. , 1. / 64.) - (0.5, 1.))(r8)
+        p9 =  Lambda(lambda x: x * (1/50. , 1. / 64.) - (0.5, 1.))(r9)
+
+    else:
+        p0  = Lambda(lambda x: x * 1/50. - 0.5)(r0)
+        p1  = Lambda(lambda x: x * 1/50. - 0.5)(r1)
+        p2  = Lambda(lambda x: x * 1/50. - 0.5)(r2)
+        p3  = Lambda(lambda x: x * 1/50. - 0.5)(r3)
+        p4  = Lambda(lambda x: x * 1/50. - 0.5)(r4)
+        p5  = Lambda(lambda x: x * 1/50. - 0.5)(r5)
+        p6  = Lambda(lambda x: x * 1/50. - 0.5)(r6)
+        p7  = Lambda(lambda x: x * 1/50. - 0.5)(r7)
+        p8  = Lambda(lambda x: x * 1/50. - 0.5)(r8)
+        p9  = Lambda(lambda x: x * 1/50. - 0.5)(r9)
+
+
+
+    filter = 64
+    p0  = Conv1D(filters=filter,    kernel_size=3, padding='same', activation='relu')(p0)
+    p1  = Conv1D(filters=filter,    kernel_size=3, padding='same', activation='relu')(p1)
+    p2  = Conv1D(filters=filter,    kernel_size=3, padding='same', activation='relu')(p2)
+    p3  = Conv1D(filters=filter,    kernel_size=3, padding='same', activation='relu')(p3)
+    p4  = Conv1D(filters=filter,    kernel_size=3, padding='same', activation='relu')(p4)
+    p5  = Conv1D(filters=filter,    kernel_size=3, padding='same', activation='relu')(p5)
+    p6  = Conv1D(filters=filter,    kernel_size=3, padding='same', activation='relu')(p6)
+    p7  = Conv1D(filters=filter,    kernel_size=3, padding='same', activation='relu')(p7)
+    p8  = Conv1D(filters=filter,    kernel_size=3, padding='same', activation='relu')(p8)
+    p9  = Conv1D(filters=filter,    kernel_size=3, padding='same', activation='relu')(p9)
+
+    k1 = 5
+    k2 = 3
+    for i, filters in enumerate([64] * 20): # each block as 10px receptive field
+        p0r = Conv1D(filters=filters,   kernel_size=k1, padding='same', activation='relu')(p0)
+        p0r = Conv1D(filters=filters,   kernel_size=k1, padding='same', activation='relu')(p0r)
+        p0  = add([p0,p0r])
+
+        p1r = Conv1D(filters=filters,   kernel_size=k1, padding='same', activation='relu')(p1)
+        p1r = Conv1D(filters=filters,   kernel_size=k1, padding='same', activation='relu')(p1r)
+        p1  = add([p1,p1r])
+
+        p2r = Conv1D(filters=filters,   kernel_size=k1, padding='same', activation='relu')(p2)
+        p2r = Conv1D(filters=filters,   kernel_size=k1, padding='same', activation='relu')(p2r)
+        p2  = add([p2,p2r])
+
+        p3r = Conv1D(filters=filters,   kernel_size=k1, padding='same', activation='relu')(p3)
+        p3r = Conv1D(filters=filters,   kernel_size=k1, padding='same', activation='relu')(p3r)
+        p3  = add([p3,p3r])
+
+        p4r = Conv1D(filters=filters,   kernel_size=k1, padding='same', activation='relu')(p4)
+        p4r = Conv1D(filters=filters,   kernel_size=k1, padding='same', activation='relu')(p4r)
+        p4  = add([p4,p4r])
+
+        p5r = Conv1D(filters=filters,   kernel_size=k1, padding='same', activation='relu')(p5)
+        p5r = Conv1D(filters=filters,   kernel_size=k1, padding='same', activation='relu')(p5r)
+        p5  = add([p5,p5r])
+
+        p6r = Conv1D(filters=filters,   kernel_size=k1, padding='same', activation='relu')(p6)
+        p6r = Conv1D(filters=filters,   kernel_size=k1, padding='same', activation='relu')(p6r)
+        p6  = add([p6,p6r])
+
+        p7r = Conv1D(filters=filters,   kernel_size=k1, padding='same', activation='relu')(p7)
+        p7r = Conv1D(filters=filters,   kernel_size=k1, padding='same', activation='relu')(p7r)
+        p7  = add([p7,p7r])
+
+        p8r = Conv1D(filters=filters,   kernel_size=k1, padding='same', activation='relu')(p8)
+        p8r = Conv1D(filters=filters,   kernel_size=k1, padding='same', activation='relu')(p8r)
+        p8  = add([p8,p8r])
+
+        p9r = Conv1D(filters=filters,   kernel_size=k1, padding='same', activation='relu')(p9)
+        p9r = Conv1D(filters=filters,   kernel_size=k1, padding='same', activation='relu')(p9r)
+        p9  = add([p9,p9r])
+
+        if i in [4,10]:
+            p0 = MaxPooling1D(pool_size=2, strides=2, padding='valid')(p0)
+            p1 = MaxPooling1D(pool_size=2, strides=2, padding='valid')(p1)
+            p2 = MaxPooling1D(pool_size=2, strides=2, padding='valid')(p2)
+            p3 = MaxPooling1D(pool_size=2, strides=2, padding='valid')(p3)
+            p4 = MaxPooling1D(pool_size=2, strides=2, padding='valid')(p4)
+            p5 = MaxPooling1D(pool_size=2, strides=2, padding='valid')(p5)
+            p6 = MaxPooling1D(pool_size=2, strides=2, padding='valid')(p6)
+            p7 = MaxPooling1D(pool_size=2, strides=2, padding='valid')(p7)
+            p8 = MaxPooling1D(pool_size=2, strides=2, padding='valid')(p8)
+            p9 = MaxPooling1D(pool_size=2, strides=2, padding='valid')(p9)
+
+    if False:
+        p0 = Lambda(nuke)(p0)
+        p1 = Lambda(nuke)(p1)
+        p2 = Lambda(nuke)(p2)
+        p3 = Lambda(nuke)(p3)
+        p4 = Lambda(nuke)(p4)
+        #p5 = Lambda(nuke)(p5)
+        #p6 = Lambda(nuke)(p6)
+        #p7 = Lambda(nuke)(p7)
+        #p8 = Lambda(nuke)(p8)
+        p9 = Lambda(nuke)(p9)
+        p10 = Lambda(nuke)(p10)
+        p11 = Lambda(nuke)(p11)
+
+    def nuke(x):
+        zeros = tf.zeros((POINTS_PER_RING, 1))
+        return tf.multiply(x, zeros)
+
+    p = Concatenate(axis=2)([p0,p1,p2,p3,p4,p5,p6,p7,p8,p9])
+
+    #p = MaxPooling1D(pool_size=2, strides=2, padding='valid')(p)
+
+    p  = Conv1D(filters=64, kernel_size=3, padding='same', activation='relu')(p)
+    pr = Conv1D(filters=64, kernel_size=3, padding='same', activation='relu')(p)
+    p  = add([p, pr])
+    pr = Conv1D(filters=64, kernel_size=3, padding='same', activation='relu')(p)
+    p  = add([p, pr])
+    pr = Conv1D(filters=64, kernel_size=3, padding='same', activation='relu')(p)
+    p  = add([p, pr])
+    p  = Conv1D(filters=16, kernel_size=3, padding='same', activation='relu')(p)
+
+    def mul_angle_axis(x):
+        angle_axis = tf.linspace(-np.pi, (POINTS_PER_RING - 1) * np.pi / POINTS_PER_RING, num=POINTS_PER_RING)
+        angle_axis = tf.expand_dims(angle_axis, axis=-1)
+        return tf.multiply(x, angle_axis)
+
+    #p = Lambda(mul_angle_axis)(p)
+    #angle = MaxPooling1D(pool_size=POINTS_PER_RING)(p)
+
+    p = Flatten()(p)
+    p = Dense( 64, activation='elu')(p)
+    p = Dense( 64, activation='elu')(p)
+    p = Dense( 32, activation='elu')(p)
+    p = Dense( 16, activation='elu')(p)
+
+    angle = Dense(1)(p)
+
+    model = Model(inputs=[r0,r1,r2,r3,r4,r5,r6,r7,r8,r9], outputs=[angle])
     return model
 
 if args.dummy:
@@ -116,7 +314,8 @@ if (args.gpus > 1) or (len(args.batch_size) > 1):
 else:
     BATCH_SIZE = args.batch_size[0]
 
-model.compile(loss='mse', optimizer=Adam(lr=LEARNING_RATE))
+
+model.compile(loss='mse' if args.dummy else angle_loss, optimizer=Nadam(lr=LEARNING_RATE))
 
 def gen_dummy(batch_size, points_per_ring = POINTS_PER_RING, training=True, rings = RINGS):
 
@@ -146,16 +345,23 @@ def gen_dummy(batch_size, points_per_ring = POINTS_PER_RING, training=True, ring
 
 
 
-# -------------------------------------------------------
-#
-# ----------------------------------------------------------
 def gen(items, batch_size, points_per_ring = POINTS_PER_RING, training=True, rings = RINGS):
-    lidar_d_i_s    = np.empty((batch_size, len(rings), points_per_ring, 1))
-    angles         = np.empty((batch_size, 1))
+    #lidar_d_i_s    = np.empty((batch_size, len(rings), points_per_ring, 2))
+    #lidar_rings = []
+    #for i in len(rings):
+    #    lidar_rings.append(np.empty((batch_size, points_per_ring, 2)))
+    angles         = np.empty((batch_size, 1), dtype=np.float32)
+    distances      = np.empty((batch_size, 1), dtype=np.float32)
+    centroids      = np.empty((batch_size, 3), dtype=np.float32)
+    lidar_rings = []
+    for i in rings:
+        lidar_rings.append(np.empty((batch_size, points_per_ring, CHANNELS),dtype=np.float32))
 
     BINS = 25.
 
     PAD = 0
+
+    skip = False
 
     if training is True:
 
@@ -164,14 +370,14 @@ def gen(items, batch_size, points_per_ring = POINTS_PER_RING, training=True, rin
         # the probability of a label ending up an a given x,y bucket would be roughly the same
         # we build a distance histogram target and since the number of points sampled from a distance
         # needs to grow proportionally with the radius of the circumference, we factor it in.
-        distances = []
+        _distances = []
         for item in items:
             tracklet, frame = item
             centroid = tracklet.get_box_centroid(frame)[:3]
             distance = np.linalg.norm(centroid[:2])  # only x y
-            distances.append(distance)
+            _distances.append(distance)
 
-        h_count,  _h_edges = np.histogram(distances, bins=int(BINS), range=(0, MAX_DIST), density=False)
+        h_count,  _h_edges = np.histogram(_distances, bins=int(BINS), range=(0, MAX_DIST), density=False)
         h_edges = np.empty(_h_edges.shape[0]-1)
 
         for i in range(h_edges.shape[0]):
@@ -196,8 +402,6 @@ def gen(items, batch_size, points_per_ring = POINTS_PER_RING, training=True, rin
         h_current = h_target.copy()
 
         print("Target distance histogram", h_target)
-    else:
-        skip = False
 
     i = 0
     seen = 0
@@ -215,43 +419,64 @@ def gen(items, batch_size, points_per_ring = POINTS_PER_RING, training=True, rin
             if training is True:
 
                 _h = int(BINS * distance / MAX_DIST)
-
                 if h_current[_h] == 0:
                     skip = True
                 else:
                     skip = False
+
                     h_current[_h] -= 1
                     if np.sum(h_current) == 0:
-                        h_current = h_target.copy()
-
+                        h_current[:] = h_target[:]
                     # random rotation along Z axis
                     random_yaw = (np.random.random_sample() * 2. - 1.) * np.pi
                     centroid = point_utils.rotZ(centroid, random_yaw)
-                    if False:
-                        # flip along x axis
-                        if np.random.randint(2) == 1:
-                            lidar[:, 0] = -lidar[:, 0]
-                            centroid[0] = -centroid[0]
-                        # flip along y axis
-                        if np.random.randint(2) == 1:
-                            lidar[:, 1] = -lidar[:, 1]
-                            centroid[1] = -centroid[1]
-                    lidar_d_i = tracklet.get_lidar_rings(frame, rings = rings, points_per_ring = points_per_ring, pad = PAD, diff=False, rotate = random_yaw) #
-                    #print(lidar_d_i[5,s:s+10,0])
+                    lidar_d_i = tracklet.get_lidar_rings(frame,
+                                                         rings = rings,
+                                                         points_per_ring = points_per_ring,
+                                                         pad = PAD,
+                                                         rotate = random_yaw,
+                                                         clip = (0.,50.)) #
 
             else:
-                lidar_d_i = tracklet.get_lidar_rings(frame, rings = rings, points_per_ring = points_per_ring, pad = PAD, diff=False)  #
+                lidar_d_i = tracklet.get_lidar_rings(frame,
+                                                     rings = rings,
+                                                     points_per_ring = points_per_ring,
+                                                     pad = PAD,
+                                                     clip = (0.,50.))  #
 
             if skip is False:
 
+                #lidar_d_i_s[i]  = lidar_d_i#[...,0:1]
+                #lidar_rings[i] = []
+                for ring in rings:
+                    lidar_ring    = lidar_rings[ring-rings[0]]
+                    lidar_ring[i] = lidar_d_i[ring-rings[0],:,:CHANNELS]
 
-                lidar_d_i_s[i]  = lidar_d_i[...,0:1]
-                angles[i]       = np.arctan2(centroid[1], centroid[0])
+                angles[i]    = np.arctan2(centroid[1], centroid[0])
+                centroids[i] = centroid
+                distances[i] = distance
+
 
                 i += 1
                 if i == batch_size:
-                    yield (lidar_d_i_s, angles)
+                    #print(lidar_rings[0])
+                    #print(lidar_rings[0][0].shape)
+
+                    seen += batch_size
+                    if seen > 1000:
+                        seen = 0
+                        for xx in rings:
+                            plt.plot(lidar_rings[xx - rings[0]][0, :, 0])
+                        yaw = np.arctan2(centroids[0][1], centroids[0][0])
+                        _yaw = int(points_per_ring * (yaw + np.pi) / (2 * np.pi))
+                        plt.axvline(x=_yaw, color='k', linestyle='--')
+                        plt.savefig('train.png')
+                        plt.clf()
+
+
+                    yield (lidar_rings, angles)
                     i = 0
+
                     if False:
                         xyhist[300+(centroids[:,1]*10.).astype(np.int32), 300+(centroids[:,0]*10.).astype(np.int32)] += 1
                         seen += batch_size
@@ -259,7 +484,6 @@ def gen(items, batch_size, points_per_ring = POINTS_PER_RING, training=True, rin
                             import cv2
                             cv2.imwrite('hist.png', xyhist * 255. / np.amax(xyhist))
                             seen = 0
-
 
 def get_items(tracklets):
     items = []
@@ -295,7 +519,7 @@ else:
         monitor='val_loss',
         verbose=0,  save_best_only=True, save_weights_only=False, mode='auto', period=1)
 
-    reduce_lr = ReduceLROnPlateau(monitor='loss', factor=0.5, patience=50, min_lr=5e-7, epsilon = 0.2, cooldown = 10)
+    reduce_lr = ReduceLROnPlateau(monitor='loss', factor=0.5, patience=4, min_lr=5e-7, epsilon = 0.2, cooldown = 4, verbose=1)
 
     model.fit_generator(
         gen(train_items, BATCH_SIZE),

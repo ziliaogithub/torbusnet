@@ -4,7 +4,7 @@ from keras.initializers import Constant, Zeros
 from keras.regularizers import l2
 from keras.layers.normalization import BatchNormalization
 from keras.models import Sequential, Model, Input
-from keras.layers import Input, merge, Layer
+from keras.layers import Input, merge, Layer, concatenate
 from keras.layers.merge import dot, Dot
 from keras.layers.core import Dense, Activation, Flatten, Lambda, Dropout, Reshape
 from keras.layers.convolutional import Conv2D, Cropping2D, AveragePooling2D
@@ -37,7 +37,7 @@ parser.add_argument('--max_epoch', type=int, default=5000, help='Epoch to run')
 parser.add_argument('--max_dist', type=float, default=25, help='Ignore centroids beyond this distance (meters)')
 parser.add_argument('--max_dist_offset', type=float, default=3, help='Ignore centroids beyond this distance (meters)')
 parser.add_argument('-b', '--batch_size', type=int, nargs='+', default=[12], help='Batch Size during training, or list of batch sizes for each GPU, e.g. -b 12,8')
-parser.add_argument('-l', '--learning_rate', type=float, default=1e-4, help='Initial learning rate')
+parser.add_argument('-l', '--learning_rate', type=float, default=1e-2, help='Initial learning rate')
 parser.add_argument('-m', '--model', help='load hdf5 model (and continue training)')
 parser.add_argument('-g', '--gpus', type=int, default=1, help='Number of GPUs used for training')
 parser.add_argument('-c', '--classifier', action='store_true', help='Train classifier instead of regressor')
@@ -81,10 +81,30 @@ def get_model_regression():
     ps = Dense( 32, activation='relu')(p)
     s = Dense(3, activation=None)(ps)
 
+<<<<<<< Updated upstream
     centroids  = Lambda(lambda x: x * (10.,10., 3.) - (0., 0., -1.5))(c) # tx ty tz
     dimensions = Lambda(lambda x: x * ( 3.,10.,10.) - (-1.5, 0., 0.))(s) # h w l
+=======
+    centroids  = Lambda(lambda x: x * (25.,25., 3.) - (0., 0., -1.5))(c) # tx ty tz
+    dimensions = Lambda(lambda x: x * ( 3.,25.,25.) - (-1.5, 0., 0.))(s) # h w l
+
+>>>>>>> Stashed changes
     model = Model(inputs=points, outputs=[centroids, dimensions])
     return model
+
+def detection_loss(y_true, y_pred):
+    print(y_true)
+    print(y_pred)
+
+    conf_loss = K.mean(K.binary_crossentropy(y_pred[:,0], y_true[:,0]), axis=-1)
+
+    return conf_loss
+
+def detection_accuracy(y_true, y_pred):
+
+    conf_accuracy =  K.mean(K.equal(y_true[:,0], K.round(y_pred[:,0])), axis=-1)
+
+    return conf_accuracy
 
 def get_model_classification():
     points = Input(shape=(CLASSIFICATION_POINTS, 4))
@@ -96,10 +116,15 @@ def get_model_classification():
     p = Conv2D(filters= 128, kernel_size=(1, 1), activation='relu')(p)
     p = Conv2D(filters= 128, kernel_size=(1, 1), activation='relu')(p)
     p = Conv2D(filters= 128, kernel_size=(1, 1), activation='relu')(p)
+<<<<<<< Updated upstream
     p = Conv2D(filters= 512, kernel_size=(1, 1), activation='relu')(p)
+=======
+    p = Conv2D(filters= 256, kernel_size=(1, 1), activation='relu')(p)
+>>>>>>> Stashed changes
 
     p = MaxPooling2D(pool_size=(CLASSIFICATION_POINTS, 1), strides=None, padding='valid')(p)
 
+<<<<<<< Updated upstream
     p = Flatten()(p)
     p = Dense(256, activation='relu')(p)
     p = Dense(128, activation='relu')(p)
@@ -107,8 +132,27 @@ def get_model_classification():
     p = Dense(64, activation='relu')(p)
     p = Dropout(0.2)(p)
     c = Dense(1, activation='sigmoid')(p)
+=======
+    p  = Flatten()(p)
+    p  = Dense(128, activation='relu')(p)
 
-    model = Model(inputs=points, outputs=c)
+    #p = Dropout(0.3)(p)
+    p = Dense(64, activation='relu')(p)
+    p = Dense(32, activation='relu')(p)
+>>>>>>> Stashed changes
+
+    #p = Dropout(0.3)(p)
+    classification = Dense(1, activation='sigmoid', name='classification')(p)
+    #centroid = Dense(3)(p)
+#    mean = K.squeeze(mean, axis=1)
+#    centroid = Lambda(lambda x: x + mean[:,:3])(centroid)
+    #centroid = Lambda(lambda x: x * (25., 25., 3.) + (0., 0., -1.5),  name='centroid')(centroid)
+
+    #detection = concatenate([classification, centroid], name='detection')
+
+    model = Model(inputs=points, outputs=classification)
+
+    #model = Model(inputs=points, outputs=[classification, centroid])
     return model
 
 if args.model:
@@ -132,7 +176,11 @@ else:
 if CLASSIFIER is False:
     model.compile(loss='mse', optimizer=Nadam(lr=LEARNING_RATE))
 else:
+<<<<<<< Updated upstream
     model.compile(loss='binary_crossentropy',optimizer=Adam(lr=LEARNING_RATE), metrics=['accuracy'])
+=======
+    model.compile(loss='binary_crossentropy', optimizer=Nadam(lr=LEARNING_RATE), metrics=['accuracy'])
+>>>>>>> Stashed changes
 
 
 # -----------------------------------------------------------------------------------------------------------------
@@ -141,7 +189,10 @@ def gen(items, batch_size, num_points, training=True, classifier=False):
     centroids   = np.empty((batch_size, 3))
     dimensions  = np.empty((batch_size, 3))
 
-    classifications = np.empty((batch_size,1), dtype=np.int32)
+    classifications      = np.empty((batch_size, 1), dtype=np.int32)
+    relative_centroids   = np.empty((batch_size, 3))
+
+    detections           = np.empty((batch_size, 4))
 
     BINS = 25.
 
@@ -240,6 +291,7 @@ def gen(items, batch_size, num_points, training=True, classifier=False):
 
             if skip is False:
 
+<<<<<<< Updated upstream
                 OBS_DIAG   = 2.5
                 ALLOWED_ERROR = 10.
                 CLASS_DIST = OBS_DIAG + ALLOWED_ERROR
@@ -288,6 +340,70 @@ def gen(items, batch_size, num_points, training=True, classifier=False):
                     if classifier:
                         yield (lidars, classifications)
                     else:
+=======
+                if classifier:
+                    OBS_DIAG   = 2.5
+                    ALLOWED_ERROR = 10.
+                    CLASS_DIST = OBS_DIAG + ALLOWED_ERROR
+                    classification = np.random.randint(2)
+                    class_points = 0
+                    attempts = 0
+                    while class_points < 1:
+                        if classification == 0:
+                            # generate a non-detection by selecting an area where is no car:
+                            # find a random point within MAX_DIST of center that is at least CLASS_DIST + OBS_DIAG from vehicle
+                            random_center = np.array(centroid[:2])
+                            while ((np.linalg.norm(random_center - centroid[:2]) <= (CLASS_DIST + OBS_DIAG)) or
+                                (np.linalg.norm(random_center) >= MAX_DIST)):
+                                random_center = (np.random.random_sample(2) * 2. - np.ones(2)) * MAX_DIST
+                            classification_center = random_center
+                        else:
+                            # for detections we want to jitter the provided centroid:
+                            # put classification centroid within ALLOWED_ERROR of real centroid
+                            dist = ALLOWED_ERROR + 1.
+                            while dist > ALLOWED_ERROR:
+                                classification_center = \
+                                    centroid[:2] + \
+                                    (2 * np.random.random_sample(2) - np.ones(2)) * ALLOWED_ERROR
+                                dist = np.linalg.norm(centroid[:2] - classification_center)
+                        class_lidar = lidar.copy()
+                        class_lidar[:, :2] -= classification_center
+                        class_lidar  = class_lidar[( (class_lidar[:,0] ** 2) + (class_lidar[:,1] ** 2) ) <= (CLASS_DIST ** 2)]
+                        class_points = class_lidar.shape[0]
+                        attempts += 1
+                        if attempts > 2:
+                            print(classification, classification_center, class_points, tracklet.xml_path, frame)
+
+                    relative_centroid = centroid
+                    relative_centroid[:2] -= classification_center
+
+                    # random rotate so we see all yaw equally
+                    random_yaw  = (np.random.random_sample() * 2. - 1.) * np.pi
+                    class_lidar = point_utils.rotZ(class_lidar, random_yaw)
+                    class_lidar = DidiTracklet.resample_lidar(class_lidar, num_points)
+
+                    relative_centroid     = point_utils.rotZ(relative_centroid, random_yaw)
+                    lidars[i]             = class_lidar
+                    classifications[i]    = classification
+                    relative_centroids[i] = relative_centroid
+
+                    detections[i]         = np.concatenate((np.array([classification], dtype=np.float32), relative_centroid), axis=0)
+
+                    i += 1
+                    if i == batch_size:
+                        yield (lidars, classifications)
+                        #yield(lidars, detections)
+                        i = 0
+                        #print(classifications)
+
+                else: # regression
+                    lidars[i]     = lidar
+                    centroids[i]  = centroid
+                    dimensions[i] = dimension
+
+                    i += 1
+                    if i == batch_size:
+>>>>>>> Stashed changes
                         yield (lidars, [centroids, dimensions])
 
                     i = 0
@@ -313,14 +429,14 @@ print("Validate items: " + str(len(validate_items)))
 
 if CLASSIFIER:
     postfix = "classifier"
-    metric  = "-acc{val_acc:.4f}"
+    metric  = "-acc{val_loss:.4f}"
 else:
     postfix = "regressor"
     metric  = "-val-loss{val_loss:.2f}"
 
 save_checkpoint = ModelCheckpoint(
     "torbusnet-"+postfix+"-epoch{epoch:02d}"+metric+".hdf5",
-    monitor='val_acc' if CLASSIFIER else 'val_loss',
+    monitor='loss' if CLASSIFIER else 'val_loss',
     verbose=0,  save_best_only=True, save_weights_only=False, mode='auto', period=1)
 
 reduce_lr = ReduceLROnPlateau(monitor='loss', factor=0.5, patience=5, min_lr=1e-7, epsilon = 0.2, cooldown = 5, verbose=1)
@@ -333,4 +449,4 @@ model.fit_generator(
     validation_data  = gen(validate_items, BATCH_SIZE, num_points=nn_points, classifier=CLASSIFIER, training = False),
     validation_steps = len(validate_items) // BATCH_SIZE,
     epochs = 2000,
-    callbacks = [save_checkpoint, reduce_lr])
+    callbacks = [reduce_lr])
