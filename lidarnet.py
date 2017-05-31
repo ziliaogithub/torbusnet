@@ -4,7 +4,7 @@ from keras.initializers import Constant, Zeros
 from keras.regularizers import l2, l1
 from keras.layers.normalization import BatchNormalization
 from keras.models import Sequential, Model, Input
-from keras.layers import Input, merge, Layer, Concatenate, Multiply
+from keras.layers import Input, merge, Layer, Concatenate, Multiply, LSTM, Bidirectional
 from keras.layers.merge import dot, Dot, add
 from keras.layers.core import Dense, Activation, Flatten, Lambda, Dropout, Reshape
 from keras.layers.convolutional import Conv2D, Cropping2D, AveragePooling2D, Conv1D
@@ -49,7 +49,7 @@ parser.add_argument('-l', '--learning_rate', type=float, default=1e-4, help='Ini
 parser.add_argument('-m', '--model', help='load hdf5 model (and continue training)')
 parser.add_argument('-g', '--gpus', type=int, default=1, help='Number of GPUs used for training')
 parser.add_argument('-d', '--dummy', action='store_true', help='Dummy data for toying')
-
+parser.add_argument('-r', '--recurrent', action='store_true', help='Use LSTM model')
 
 args = parser.parse_args()
 
@@ -128,6 +128,27 @@ def angle_loss(angle_true, angle_pred):
     print('vector_pred', vector_pred.shape)
 
     return K.mean(K.square(vector_true - vector_pred), axis=-1)
+
+def get_model_recurrent():
+    NRINGS = len(RINGS)
+    lidar_distances   = Input(shape=(POINTS_PER_RING, NRINGS ))  # d i
+    lidar_intensities = Input(shape=(POINTS_PER_RING, NRINGS ))  # d i
+
+    l0  = Lambda(lambda x: x * 1/50. )(lidar_distances)
+    l1  = Lambda(lambda x: x * 1/64. )(lidar_intensities)
+
+    l  = Concatenate(axis=-1)([l0,l1])
+
+    l = Bidirectional(LSTM(64, return_sequences=True, implementation=2))(l)
+    l = Bidirectional(LSTM(64, return_sequences=True, implementation=2))(l)
+    l = Dense(1, activation='sigmoid')(l)
+
+    #distances = Lambda(lambda x: x * 50.)(l)
+    classsification = l
+
+    model = Model(inputs=[lidar_distances, lidar_intensities], outputs=[classsification])
+    return model
+
 
 def get_model():
     # receptive field needs to be 1/5 of total to detect large objects close by (e.g. for 1024 -> 205)
@@ -300,6 +321,9 @@ elif args.model:
     print("Loading model " + args.model)
     model = load_model(args.model)
     model.summary()
+elif args.recurrent:
+    model = get_model_recurrent()
+    model.summary()
 else:
     model = get_model()
     model.summary()
@@ -314,8 +338,17 @@ if (args.gpus > 1) or (len(args.batch_size) > 1):
 else:
     BATCH_SIZE = args.batch_size[0]
 
+if args.dummy:
+    _loss = 'mse'
+    _metrics = []
+elif args.recurrent:
+    _loss = 'binary_crossentropy'
+    _metrics = ['accuracy']
+else:
+    _loss = angle_loss
+    _metrics = []
 
-model.compile(loss='mse' if args.dummy else angle_loss, optimizer=Nadam(lr=LEARNING_RATE))
+model.compile(loss=_loss, optimizer='rmsprop', metrics = _metrics)
 
 def gen_dummy(batch_size, points_per_ring = POINTS_PER_RING, training=True, rings = RINGS):
 
@@ -345,7 +378,7 @@ def gen_dummy(batch_size, points_per_ring = POINTS_PER_RING, training=True, ring
 
 
 
-def gen(items, batch_size, points_per_ring = POINTS_PER_RING, training=True, rings = RINGS):
+def gen(items, batch_size, points_per_ring = POINTS_PER_RING, training=True, rings = RINGS, recurrent=False):
     #lidar_d_i_s    = np.empty((batch_size, len(rings), points_per_ring, 2))
     #lidar_rings = []
     #for i in len(rings):
@@ -353,6 +386,17 @@ def gen(items, batch_size, points_per_ring = POINTS_PER_RING, training=True, rin
     angles         = np.empty((batch_size, 1), dtype=np.float32)
     distances      = np.empty((batch_size, 1), dtype=np.float32)
     centroids      = np.empty((batch_size, 3), dtype=np.float32)
+    boxes          = np.empty((batch_size, 8, 3), dtype=np.float32)
+    lidars         = np.empty((batch_size, len(RINGS), points_per_ring, CHANNELS), dtype=np.float32)
+    lidar_seqs     = np.empty((batch_size, points_per_ring, len(RINGS)), dtype=np.float32)
+    intensity_seqs = np.empty((batch_size, points_per_ring, len(RINGS)), dtype=np.float32)
+
+    # label
+    classification_seqs  = np.empty((batch_size, points_per_ring,1), dtype=np.float32)
+
+    max_angle_span = 0.
+    this_max_angle = False
+
     lidar_rings = []
     for i in rings:
         lidar_rings.append(np.empty((batch_size, points_per_ring, CHANNELS),dtype=np.float32))
@@ -386,22 +430,23 @@ def gen(items, batch_size, points_per_ring = POINTS_PER_RING, training=True, rin
         h_edges[h_count == 0] = 0
         h_target = None
         best_min = -1
+        _h_target = np.zeros_like(h_count)
         for i,r in enumerate(h_edges):
             if r > 0:
-                k = h_count[i]/r
-                _h_target = np.array(h_edges * k, dtype=np.int32)
+                # change this line to other target distributions of distance
+                _h_target[h_count != 0] = h_count[i]
                 if np.all(h_count - _h_target >= 0):
                     _min = np.amin(h_count[_h_target > 0] - _h_target[_h_target > 0])
-                    # todo: improve when there are best candidates
                     if _min > best_min:
                         h_target = _h_target
                         best_min = _min
         if h_target is None:
             print("WARNING: Could not find optimal balacing set, reverting to bad one")
+            h_target = np.zeros_like(h_count)
             h_target[h_count > 0] = np.amin(h_count[h_count > 0])
         h_current = h_target.copy()
 
-        print("Target distance histogram", h_target)
+        #print("Target distance histogram", h_target)
 
     i = 0
     seen = 0
@@ -414,6 +459,7 @@ def gen(items, batch_size, points_per_ring = POINTS_PER_RING, training=True, rin
             tracklet, frame = item
 
             centroid     = tracklet.get_box_centroid(frame)[:3]
+            box          = tracklet.get_box(frame).T
             distance     = np.linalg.norm(centroid[:2]) # only x y
 
             if training is True:
@@ -427,15 +473,39 @@ def gen(items, batch_size, points_per_ring = POINTS_PER_RING, training=True, rin
                     h_current[_h] -= 1
                     if np.sum(h_current) == 0:
                         h_current[:] = h_target[:]
+
                     # random rotation along Z axis
                     random_yaw = (np.random.random_sample() * 2. - 1.) * np.pi
-                    centroid = point_utils.rotZ(centroid, random_yaw)
-                    lidar_d_i = tracklet.get_lidar_rings(frame,
+                    centroid   = point_utils.rotZ(centroid, random_yaw)
+                    box        = point_utils.rotZ(box, random_yaw)
+                    lidar_d_i  = tracklet.get_lidar_rings(frame,
                                                          rings = rings,
                                                          points_per_ring = points_per_ring,
                                                          pad = PAD,
                                                          rotate = random_yaw,
                                                          clip = (0.,50.)) #
+
+                    min_yaw =  np.pi
+                    max_yaw = -np.pi
+
+                    this_max_angle = False
+
+                    for b in box[:4]:
+                        yaw = np.arctan2(b[1], b[0])
+                        if yaw > max_yaw:
+                            max_yaw = yaw
+                        if yaw < min_yaw:
+                            min_yaw = yaw
+
+                    angle_span = np.absolute(min_yaw-max_yaw)
+
+                    if  angle_span >= np.pi:
+                        skip = True
+                    elif angle_span > max_angle_span:
+                        max_angle_span = angle_span
+
+                        #print("Max angle span:", max_angle_span)
+                        this_max_angle = True
 
             else:
                 lidar_d_i = tracklet.get_lidar_rings(frame,
@@ -449,13 +519,29 @@ def gen(items, batch_size, points_per_ring = POINTS_PER_RING, training=True, rin
                 #lidar_d_i_s[i]  = lidar_d_i#[...,0:1]
                 #lidar_rings[i] = []
                 for ring in rings:
-                    lidar_ring    = lidar_rings[ring-rings[0]]
-                    lidar_ring[i] = lidar_d_i[ring-rings[0],:,:CHANNELS]
+                    lidar_ring     = lidar_rings[ring-rings[0]]
+                    lidar_ring[i]  = lidar_d_i[ring-rings[0],:,:CHANNELS]
+                    lidars[i,ring-rings[0]] = lidar_d_i[ring-rings[0],:,:CHANNELS]
 
                 angles[i]    = np.arctan2(centroid[1], centroid[0])
                 centroids[i] = centroid
                 distances[i] = distance
+                boxes[i]     = box
 
+                if this_max_angle:
+                    for xx in rings:
+                        plt.plot(lidar_d_i[xx-rings[0],:,0])
+                    xyaw = np.arctan2(centroid[1], centroid[0])
+                    _yaw = int(points_per_ring * (xyaw + np.pi) / (2 * np.pi))
+                    plt.axvline(x=_yaw, color='k', linestyle='--')
+                    for b in box[:4]:
+                        xyaw = np.arctan2(b[1], b[0])
+                        _yaw = int(points_per_ring * (xyaw + np.pi) / (2 * np.pi))
+                        plt.axvline(x=_yaw, color='blue', linestyle=':')
+
+                    plt.savefig('train-max_angle.png')
+                    plt.clf()
+                    this_max_angle = False
 
                 i += 1
                 if i == batch_size:
@@ -470,11 +556,37 @@ def gen(items, batch_size, points_per_ring = POINTS_PER_RING, training=True, rin
                         yaw = np.arctan2(centroids[0][1], centroids[0][0])
                         _yaw = int(points_per_ring * (yaw + np.pi) / (2 * np.pi))
                         plt.axvline(x=_yaw, color='k', linestyle='--')
+                        for b in boxes[0][:4]:
+                            yaw = np.arctan2(b[1], b[0])
+                            _yaw = int(points_per_ring * (yaw + np.pi) / (2 * np.pi))
+                            plt.axvline(x=_yaw, color='blue', linestyle=':')
+
                         plt.savefig('train.png')
                         plt.clf()
 
+                    if recurrent:
+                        for ii in range(batch_size):
+                            for ring in rings:
+                                lidar_seqs[ii,:,ring-rings[0]]     = lidars[ii,ring-rings[0],:, 0]
+                                intensity_seqs[ii,:,ring-rings[0]] = lidars[ii,ring-rings[0],:, 1]
 
-                    yield (lidar_rings, angles)
+                            max_yaw = -np.pi
+                            min_yaw =  np.pi
+                            for b in boxes[ii][:4]:
+                                yaw = np.arctan2(b[1], b[0])
+                                if yaw > max_yaw:
+                                    max_yaw = yaw
+                                if yaw < min_yaw:
+                                    min_yaw = yaw
+                            _min_yaw = int(points_per_ring * (min_yaw + np.pi) / (2 * np.pi))
+                            _max_yaw = int(points_per_ring * (max_yaw + np.pi) / (2 * np.pi))
+
+                            classification_seqs[ii, :] = 0.
+                            classification_seqs[ii, _min_yaw:_max_yaw+1] = 1. # distances[ii] for classficiation
+
+                        yield ([lidar_seqs, intensity_seqs], classification_seqs)
+                    else:
+                        yield (lidar_rings, angles)
                     i = 0
 
                     if False:
@@ -510,9 +622,12 @@ else:
     print("Train items:    " + str(len(train_items)))
     print("Validate items: " + str(len(validate_items)))
 
-
-    postfix = ""
-    metric  = "-loss{val_loss:.2f}"
+    if args.recurrent:
+        postfix = "recurrent"
+        metric  = "-val_acc{val_acc:.4f}"
+    else:
+        postfix = ""
+        metric  = "-val_loss{val_loss:.2f}"
 
     save_checkpoint = ModelCheckpoint(
         "lidarnet"+postfix+"-epoch{epoch:02d}"+metric+".hdf5",
@@ -522,9 +637,9 @@ else:
     reduce_lr = ReduceLROnPlateau(monitor='loss', factor=0.5, patience=4, min_lr=5e-7, epsilon = 0.2, cooldown = 4, verbose=1)
 
     model.fit_generator(
-        gen(train_items, BATCH_SIZE),
+        gen(train_items, BATCH_SIZE, recurrent=args.recurrent),
         steps_per_epoch  = len(train_items) // BATCH_SIZE,
-        validation_data  = gen(validate_items, BATCH_SIZE, training = False),
+        validation_data  = gen(validate_items, BATCH_SIZE, recurrent=args.recurrent, training = False),
         validation_steps = len(validate_items) // BATCH_SIZE,
         epochs = 2000,
         callbacks = [save_checkpoint, reduce_lr])

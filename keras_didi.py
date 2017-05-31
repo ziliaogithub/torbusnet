@@ -176,11 +176,7 @@ else:
 if CLASSIFIER is False:
     model.compile(loss='mse', optimizer=Nadam(lr=LEARNING_RATE))
 else:
-<<<<<<< Updated upstream
-    model.compile(loss='binary_crossentropy',optimizer=Adam(lr=LEARNING_RATE), metrics=['accuracy'])
-=======
     model.compile(loss='binary_crossentropy', optimizer=Nadam(lr=LEARNING_RATE), metrics=['accuracy'])
->>>>>>> Stashed changes
 
 
 # -----------------------------------------------------------------------------------------------------------------
