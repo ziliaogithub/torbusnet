@@ -4,7 +4,7 @@ from keras.initializers import Constant, Zeros
 from keras.regularizers import l2, l1
 from keras.layers.normalization import BatchNormalization
 from keras.models import Sequential, Model, Input
-from keras.layers import Input, merge, Layer, Concatenate, Multiply, LSTM, Bidirectional
+from keras.layers import Input, merge, Layer, Concatenate, Multiply, LSTM, Bidirectional, GRU
 from keras.layers.merge import dot, Dot, add
 from keras.layers.core import Dense, Activation, Flatten, Lambda, Dropout, Reshape
 from keras.layers.convolutional import Conv2D, Cropping2D, AveragePooling2D, Conv1D
@@ -88,14 +88,18 @@ def get_model_recurrent():
 
     l  = Concatenate(axis=-1)([l0,l1])
 
-    l = Bidirectional(LSTM(128, return_sequences=True, implementation=2))(l)
-    l = Bidirectional(LSTM(128, return_sequences=True, implementation=2))(l)
-    l = Dense(1, activation='sigmoid')(l)
+    l = Bidirectional(GRU(64, return_sequences=True))(l)
+    l = Bidirectional(GRU(64, return_sequences=True))(l)
+    l = Bidirectional(GRU(4, return_sequences=True))(l)
+    l = Flatten()(l)
+    l = Dense(128, activation='relu')(l)
+    l = Dense(64, activation='relu')(l)
+    l = Dense(3, activation='linear')(l)
 
-    #distances = Lambda(lambda x: x * 50.)(l)
-    classsification = l
+    distances = Lambda(lambda x: x * (50., 50., 3.))(l)
+    #classsification = l
 
-    model = Model(inputs=[lidar_distances, lidar_intensities], outputs=[classsification])
+    model = Model(inputs=[lidar_distances, lidar_intensities], outputs=[distances])
     return model
 
 
@@ -118,8 +122,9 @@ else:
     BATCH_SIZE = args.batch_size[0]
 
 if args.recurrent:
-    _loss = 'binary_crossentropy'
-    _metrics = ['accuracy']
+    #_loss = 'binary_crossentropy'
+    _loss = 'mse'
+    _metrics = ['mse']
 
 model.compile(loss=_loss, optimizer='rmsprop', metrics = _metrics)
 
@@ -186,7 +191,7 @@ def gen(items, batch_size, points_per_ring = POINTS_PER_RING, training=True, rin
                         h_target = _h_target
                         best_min = _min
         if h_target is None:
-            print("WARNING: Could not find optimal balacing set, reverting to bad one")
+            print("WARNING: Could not find optimal balacing set, reverting to trivial (flat) one")
             h_target = np.zeros_like(h_count)
             h_target[h_count > 0] = np.amin(h_count[h_count > 0])
         h_current = h_target.copy()
@@ -249,7 +254,8 @@ def gen(items, batch_size, points_per_ring = POINTS_PER_RING, training=True, rin
                     elif angle_span > max_angle_span:
                         max_angle_span = angle_span
 
-                        #print("Max angle span:", max_angle_span)
+                        print("Max angle span:", max_angle_span)
+                        print(tracklet.xml_path, frame)
                         this_max_angle = True
 
             else:
@@ -326,9 +332,9 @@ def gen(items, batch_size, points_per_ring = POINTS_PER_RING, training=True, rin
                         _max_yaw = int(points_per_ring * (max_yaw + np.pi) / (2 * np.pi))
 
                         classification_seqs[ii, :] = 0.
-                        classification_seqs[ii, _min_yaw:_max_yaw+1] = 1. # distances[ii] for classficiation
+                        classification_seqs[ii, _min_yaw:_max_yaw+1] = distances[ii] #for classficiation
 
-                    yield ([lidar_seqs, intensity_seqs], classification_seqs)
+                    yield ([lidar_seqs, intensity_seqs], centroids) #classification_seqs)
                     i = 0
 
 def get_items(tracklets):
@@ -349,8 +355,8 @@ print("Train items:    " + str(len(train_items)))
 print("Validate items: " + str(len(validate_items)))
 
 if args.recurrent:
-    postfix = "recurrent"
-    metric  = "-val_acc{val_acc:.4f}"
+    postfix = "-recurrent"
+    metric  = "-val_loss{val_loss:.4f}"
 else:
     postfix = ""
     metric  = "-val_loss{val_loss:.2f}"
@@ -360,7 +366,7 @@ save_checkpoint = ModelCheckpoint(
     monitor='val_loss',
     verbose=0,  save_best_only=True, save_weights_only=False, mode='auto', period=1)
 
-reduce_lr = ReduceLROnPlateau(monitor='loss', factor=0.5, patience=4, min_lr=5e-7, epsilon = 0.2, cooldown = 4, verbose=1)
+reduce_lr = ReduceLROnPlateau(monitor='loss', factor=0.5, patience=10, min_lr=5e-7, epsilon = 0.2, verbose=1)
 
 model.fit_generator(
     gen(train_items, BATCH_SIZE),
