@@ -88,12 +88,10 @@ def get_model_recurrent():
 
     l  = Concatenate(axis=-1)([l0,l1])
 
-    l = Bidirectional(GRU(64, return_sequences=True))(l)
-    l = Bidirectional(GRU(64, return_sequences=True))(l)
-    l = Bidirectional(GRU(4, return_sequences=True))(l)
+    l = Bidirectional(GRU(32, return_sequences=True))(l)
+    l = Bidirectional(GRU(16, return_sequences=True))(l)
+    l = Bidirectional(GRU( 4, return_sequences=True))(l)
     l = Flatten()(l)
-    l = Dense(128, activation='relu')(l)
-    l = Dense(64, activation='relu')(l)
     l = Dense(3, activation='linear')(l)
 
     distances = Lambda(lambda x: x * (50., 50., 3.))(l)
