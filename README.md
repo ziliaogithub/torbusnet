@@ -1,6 +1,6 @@
 ## TORBUS Team: *Round 1 entry for DIDI/Udacity Competition*
 
-This is a summary on the work done for Didi / Udacity competition for round 1.
+This is a summary of the work done for Didi / Udacity competition for round 1.
 
 ### Installation
 
@@ -33,7 +33,13 @@ The ground truth provided by the competition organizers consists of bag files re
 
 There were some issues with the ground truth:
 * It does not account for obstacle orientation (yaw)
-* Sync issues: tracked obstacle does not match its location in many frames
+
+![no yaw](./doc/lidar-sync-issues.png)
+
+* Sync issues: tracked obstacle does not match its location in many frames, e.g.:
+
+![misalignment](./doc/lidar-sync-misalign.png)
+
 * Frame reference: tracklet files are generated for the camera framerate, and we'll need them in the lidar framerate.
 
 #### Step 1: Lidar-referenced tracklets and yaw estimation.
@@ -42,6 +48,30 @@ We modified the `generate_tracklet.py` script to:
 * Correct sync issues by using alternative timestamps for the obstacle RTK messages.
 * Detect obstacle yaw if the obstacle moves by approximating its trajectory. There are bag files in which the obstacle does not move, which we'll fix in step 2.
 
-#### Step 2: Lidar-referenced tracklets and yaw estimation.
+#### Step 2: Pose and alignment fine-tuning
 
-There's a lot of frames that are not properly aligned. Since we can visually inspect the cars used as obstacles, we modeled them as point clouds (convex hull approximations) and build a custom RANSAC pose-alignment to fine-tune alignment (tx,ty) and place it exactly over the ground plane (tz).
+There's a lot of frames where the (`tx,tx,tz`) values are not properly aligned with the obstacle pose. Since we can visually inspect the cars used as obstacles, we modeled them as point clouds (convex hull approximations) and build a custom RANSAC pose-alignment to fine-tune alignment in (tx,ty) coordinates and placing them exactly over the ground plane (tz). This fixes all issues with pitch/roll lidar misalignment.
+
+Here's the 3d model of one of the obstacle vehicles:
+
+![obstacle vehicle](./doc/obstacle-3d-model.png)
+
+And here's the RANSAC pose alignment fixing the misaligned position (red) and the resulting, aligned match (white):
+
+![obstacle pose alignment](./doc/obstacle-pose-alignment.png)
+
+![obstacle pose alignment 2](./doc/obstacle-pose-alignment-2.png)
+
+The process is governed by the `refine.py` script under `didi-competion/tracklets/python`. 
+
+#### Step 3: Outlier removal
+
+In some cases RANSAC refined on a specific frame results in a not perfect alignment. We build an outlier detector on a per-bag basis using the obstacle trajectory to automatically remove frames where the obstacle position deviates from the predicted trajectory:
+
+![outlier frame removel](./doc/1-8f-plot.png)
+
+### Bag prediction
+
+The code in `bag_prediction.py` is not a ROS node but parses a bag file secuentially and listens to the lidar point clould messages, calculates the obstacle pose and size and for each timestamp of incoming video frame, generates a pose using the last known position. This naïve approach got us to ~1% score and since round #1 is qualifying only and we believe we qualify already, we've started work on an completely revampted pipeline for round two.
+
+STAY TUNED
