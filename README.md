@@ -72,6 +72,6 @@ In some cases RANSAC refined on a specific frame results in a not perfect alignm
 
 ### Bag prediction
 
-The code in `bag_prediction.py` is not a ROS node but parses a bag file secuentially and listens to the lidar point clould messages, calculates the obstacle pose and size and for each timestamp of incoming video frame, generates a pose using the last known position. This naïve approach got us to ~1% score and since round #1 is qualifying only and we believe we qualify already, we've started work on an completely revampted pipeline for round two.
+The code in `bag_prediction.py` is not a ROS node but parses a bag file secuentially and listens to the lidar point cloud messages, calculates the obstacle pose and size and for each timestamp of incoming video frame, generates a pose using the last known position, *all in 15 msecs!*. This naïve approach got us to ~1% score and since round #1 is qualifying only and we believe we qualify already (our approach is faster than realtime), we've started work on an completely revampted pipeline for round two.
 
 STAY TUNED
