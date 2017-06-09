@@ -21,6 +21,8 @@ from keras.callbacks import ModelCheckpoint, ReduceLROnPlateau
 from keras.models import load_model
 from torbus_layers import TorbusMaxPooling2D
 import tensorflow as tf
+from sklearn.cross_validation import train_test_split
+import copy
 
 import multi_gpu
 
@@ -34,13 +36,17 @@ import sys
 import random
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 sys.path.append(BASE_DIR)
+
 sys.path.append(os.path.join(BASE_DIR, 'didi-competition/tracklets/python'))
 
 from diditracklet  import *
 import point_utils
 
 parser = argparse.ArgumentParser()
-parser.add_argument('--data_dir', default='../release2/Data-points-processed', help='Tracklets top dir')
+parser.add_argument('--data_dir', default='../release3/Data-points-processed', help='Tracklets top dir')
+parser.add_argument('--train-file', default='./train-release3.txt', help='Fileindex for training')
+parser.add_argument('--validate-file', default='./validate-release3.txt', help='Fileindex validation')
+parser.add_argument('--validate-split', default=None, type=int, help='Use % percent of train set instead of fileindex, e.g --validate-split 20%' )
 parser.add_argument('--max_epoch', type=int, default=5000, help='Epoch to run')
 parser.add_argument('--max_dist', type=float, default=25, help='Ignore centroids beyond this distance (meters)')
 parser.add_argument('-b', '--batch_size', type=int, nargs='+', default=[1], help='Batch Size during training, or list of batch sizes for each GPU, e.g. -b 12,8')
@@ -52,6 +58,7 @@ parser.add_argument('-t', '--test', action='store_true', help='Test model on val
 parser.add_argument('-c', '--cpu', action='store_true', help='force CPU usage')
 parser.add_argument('-p', '--points-per-ring', action='store', type=int, default=1024, help='Number of points per lidar ring')
 parser.add_argument('-r', '--rings', nargs='+', type=int, default=[10,24], help='Range of rings to use e.g. -r 10 14 uses rings 10,11,12,13 inclusive')
+parser.add_argument('-u', '--unsafe-training', action='store_true', help='Use unrefined tracklets for training (UNSAFE!)')
 
 args = parser.parse_args()
 
@@ -66,6 +73,13 @@ MAX_EPOCH      = args.max_epoch
 LEARNING_RATE  = args.learning_rate
 DATA_DIR       = args.data_dir
 MAX_DIST       = args.max_dist
+
+UNSAFE_TRAINING = args.unsafe_training
+if UNSAFE_TRAINING:
+    XML_TRACKLET_FILENAME = 'tracklet_labels.xml'
+else:
+    XML_TRACKLET_FILENAME = 'tracklet_labels_trainable.xml'
+
 
 '''
 11	1539
@@ -82,7 +96,7 @@ MAX_DIST       = args.max_dist
 '''
 assert args.gpus  == len(args.batch_size)
 
-def get_model_recurrent(points_per_ring, rings):
+def get_model_recurrent(points_per_ring, rings, hidden_neurons = [256, 128, 64], dropout=0.2, recurrent_dropout=0.2):
     lidar_distances   = Input(shape=(points_per_ring, rings ))  # d i
     lidar_intensities = Input(shape=(points_per_ring, rings ))  # d i
 
@@ -91,8 +105,9 @@ def get_model_recurrent(points_per_ring, rings):
 
     l  = Concatenate(axis=-1)([l0,l1])
 
-    l = Bidirectional(GRU(64, return_sequences=True))(l)
-    l = Bidirectional(GRU(64, return_sequences=True))(l)
+    for hidden_neuron in hidden_neurons:
+        l = GRU(hidden_neuron, return_sequences=True)(l)
+
     #l = Bidirectional(GRU(64, return_sequences=True))(l)
     l = Dense(1, activation='sigmoid')(l)
 
@@ -101,37 +116,6 @@ def get_model_recurrent(points_per_ring, rings):
 
     model = Model(inputs=[lidar_distances, lidar_intensities], outputs=[classsification])
     return model
-
-
-if args.model:
-    print("Loading model " + args.model)
-    model = load_model(args.model)
-    model.summary()
-    points_per_ring = model.get_input_shape_at(0)[0][1]
-    nrings = model.get_input_shape_at(0)[0][2]
-    print('Loaded model with ' + str(points_per_ring) + ' points per ring and ' + str(nrings) + ' rings')
-    assert points_per_ring == args.points_per_ring
-    assert nrings == len(rings)
-
-else:
-    points_per_ring = args.points_per_ring
-    model = get_model_recurrent(points_per_ring, len(rings))
-    model.summary()
-
-if (args.gpus > 1) or (len(args.batch_size) > 1):
-    if len(args.batch_size) == 1:
-        model = multi_gpu.make_parallel(model, args.gpus )
-        BATCH_SIZE = args.gpus * args.batch_size[0]
-    else:
-        BATCH_SIZE = sum(args.batch_size)
-        model = multi_gpu.make_parallel(model, args.gpus , splits=args.batch_size)
-else:
-    BATCH_SIZE = args.batch_size[0]
-
-_loss = 'binary_crossentropy'
-_metrics = ['acc']
-
-model.compile(loss=_loss, optimizer=RMSprop(lr=LEARNING_RATE, ), metrics = _metrics)
 
 def save_lidar_plot(lidar_distance, box, filename, highlight=None):
     points_per_ring = lidar_distance.shape[0]
@@ -265,8 +249,8 @@ def gen(items, batch_size, points_per_ring, rings, training=True,):
                     lidar_d_i  = tracklet.get_lidar_rings(frame,
                                                           rings = rings,
                                                           points_per_ring = points_per_ring,
+                                                          clip=(0., 50.),
                                                           rotate = random_yaw,
-                                                          clip = (0.,50.),
                                                           flipX = flipX, flipY = flipY) #
 
                     # initialize with worst case to make sure they get updated
@@ -295,6 +279,7 @@ def gen(items, batch_size, points_per_ring, rings, training=True,):
                         this_max_angle = True
 
             else:
+                #print(tracklet, frame)
                 lidar_d_i = tracklet.get_lidar_rings(frame,
                                                      rings = rings,
                                                      points_per_ring = points_per_ring,
@@ -349,14 +334,48 @@ def get_items(tracklets):
             state    = tracklet.get_state(frame)
             centroid = tracklet.get_box_centroid(frame)[:3]
             distance = np.linalg.norm(centroid[:2]) # only x y
-            if (distance < MAX_DIST) and (state == 1):
+            if (distance < MAX_DIST) and ( (state == 1) or UNSAFE_TRAINING):
                 items.append((tracklet, frame))
     return items
 
-validate_items = get_items(provider_didi.get_tracklets(DATA_DIR, "validate.txt"))
+
+if args.model:
+    print("Loading model " + args.model)
+    model = load_model(args.model)
+    model.summary()
+    points_per_ring = model.get_input_shape_at(0)[0][1]
+    nrings = model.get_input_shape_at(0)[0][2]
+    print('Loaded model with ' + str(points_per_ring) + ' points per ring and ' + str(nrings) + ' rings')
+    assert points_per_ring == args.points_per_ring
+    assert nrings == len(rings)
+else:
+    points_per_ring = args.points_per_ring
+    model = get_model_recurrent(points_per_ring, len(rings))
+    model.summary()
+
+if (args.gpus > 1) or (len(args.batch_size) > 1):
+    if len(args.batch_size) == 1:
+        model = multi_gpu.make_parallel(model, args.gpus )
+        BATCH_SIZE = args.gpus * args.batch_size[0]
+    else:
+        BATCH_SIZE = sum(args.batch_size)
+        model = multi_gpu.make_parallel(model, args.gpus , splits=args.batch_size)
+else:
+    BATCH_SIZE = args.batch_size[0]
+
+if args.validate_split is None:
+    validate_items = get_items(provider_didi.get_tracklets(DATA_DIR, args.validate_file, xml_filename=XML_TRACKLET_FILENAME))
+
+_loss = 'binary_crossentropy'
+_metrics = ['acc']
+
+model.compile(loss=_loss, optimizer=Adam(lr=LEARNING_RATE, ), metrics = _metrics)
 
 if args.test:
     distance_seq = np.empty((points_per_ring, len(rings)), dtype=np.float32)
+    if args.validate_split is not None:
+        _items = get_items(provider_didi.get_tracklets(DATA_DIR, args.train_file, xml_filename=XML_TRACKLET_FILENAME))
+        train_items, validate_items = train_test_split(_items, test_size=args.validate_split * 0.01)
 
     predictions = model.predict_generator(
         generator=gen(validate_items, 1, points_per_ring, rings, training = False),
@@ -378,7 +397,26 @@ if args.test:
         i += 1
 
 else:
-    train_items = get_items(provider_didi.get_tracklets(DATA_DIR, "train.txt"))
+    train_items = get_items(provider_didi.get_tracklets(DATA_DIR, args.train_file, xml_filename=XML_TRACKLET_FILENAME))
+    if args.validate_split is not None:
+        train_items, _validate_items = train_test_split(train_items, test_size=args.validate_split * 0.01)
+        # generators are executed concurrently and Diditracklets are not thread-safe, make sure
+        # no instance of tracklets are used concurrently... in other words: copy them
+        tracklet_to_tracklet = {}
+        validate_items = []
+        for item in _validate_items:
+            tracklet, frame = item
+            if tracklet in tracklet_to_tracklet:
+                _tracklet = tracklet_to_tracklet[tracklet]
+            else:
+                _tracklet = copy.copy(tracklet)
+                tracklet_to_tracklet[tracklet] = _tracklet
+            validate_items.append((_tracklet, frame))
+
+        print("unique train_items:    " + str(len(set(train_items))))
+        print("unique validate_items: " + str(len(set(validate_items))))
+
+
     print("Train items:    " + str(len(train_items)))
     print("Validate items: " + str(len(validate_items)))
 
@@ -390,12 +428,12 @@ else:
         monitor='val_acc',
         verbose=0,  save_best_only=True, save_weights_only=False, mode='auto', period=1)
 
-    reduce_lr = ReduceLROnPlateau(monitor='loss', factor=0.5, patience=10, min_lr=5e-7, epsilon = 0.2, verbose=1)
+    reduce_lr = ReduceLROnPlateau(monitor='val_acc', factor=0.5, patience=10, min_lr=1e-7, epsilon = 0.0001, verbose=1)
 
     model.fit_generator(
         gen(train_items, BATCH_SIZE, points_per_ring, rings),
         steps_per_epoch  = len(train_items) // BATCH_SIZE,
         validation_data  = gen(validate_items, BATCH_SIZE, points_per_ring, rings, training = False),
         validation_steps = len(validate_items) // BATCH_SIZE,
-        epochs = 2000,
-        callbacks = [save_checkpoint, reduce_lr])
+        epochs = 2000,)
+        #callbacks = [save_checkpoint, reduce_lr])
