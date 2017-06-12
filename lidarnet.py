@@ -21,7 +21,7 @@ from keras.callbacks import ModelCheckpoint, ReduceLROnPlateau
 from keras.models import load_model
 from torbus_layers import TorbusMaxPooling2D
 import tensorflow as tf
-from sklearn.cross_validation import train_test_split
+from sklearn.model_selection import train_test_split
 import copy
 
 import multi_gpu
@@ -96,7 +96,7 @@ else:
 '''
 assert args.gpus  == len(args.batch_size)
 
-def get_model_recurrent(points_per_ring, rings, hidden_neurons = [256, 128, 64], dropout=0.2, recurrent_dropout=0.2):
+def get_model_recurrent(points_per_ring, rings, hidden_neurons = [64, 128, 256], dropout=0.2, recurrent_dropout=0.2):
     lidar_distances   = Input(shape=(points_per_ring, rings ))  # d i
     lidar_intensities = Input(shape=(points_per_ring, rings ))  # d i
 
@@ -105,10 +105,16 @@ def get_model_recurrent(points_per_ring, rings, hidden_neurons = [256, 128, 64],
 
     l  = Concatenate(axis=-1)([l0,l1])
 
+    '''
+    def SELU(x):
+        alpha = 1.6732632423543772848170429916717
+        scale = 1.0507009873554804934193349852946
+        return scale * K.switch( K.greater_equal(x, 0.0), x, alpha * K.elu(x))
+    '''
+
     for hidden_neuron in hidden_neurons:
         l = GRU(hidden_neuron, return_sequences=True)(l)
 
-    #l = Bidirectional(GRU(64, return_sequences=True))(l)
     l = Dense(1, activation='sigmoid')(l)
 
     #distances = Lambda(lambda x: x * (50., 50., 3.))(l)
@@ -338,6 +344,25 @@ def get_items(tracklets):
                 items.append((tracklet, frame))
     return items
 
+def split_train(train_items, test_size):
+    train_items, _validate_items = train_test_split(train_items, test_size=args.validate_split * 0.01)
+    # generators are executed concurrently and Diditracklets are not thread-safe,
+    # make sure no instance of tracklets are used concurrently... in other words:
+    # make copies of tracklets for the validation generator
+    tracklet_to_tracklet = {}
+    validate_items = []
+    for item in _validate_items:
+        tracklet, frame = item
+        if tracklet in tracklet_to_tracklet:
+            _tracklet = tracklet_to_tracklet[tracklet]
+        else:
+            _tracklet = copy.copy(tracklet)
+            tracklet_to_tracklet[tracklet] = _tracklet
+        validate_items.append((_tracklet, frame))
+
+    print("unique train_items:    " + str(len(set(train_items))))
+    print("unique validate_items: " + str(len(set(validate_items))))
+    return train_items, validate_items
 
 if args.model:
     print("Loading model " + args.model)
@@ -375,11 +400,11 @@ if args.test:
     distance_seq = np.empty((points_per_ring, len(rings)), dtype=np.float32)
     if args.validate_split is not None:
         _items = get_items(provider_didi.get_tracklets(DATA_DIR, args.train_file, xml_filename=XML_TRACKLET_FILENAME))
-        train_items, validate_items = train_test_split(_items, test_size=args.validate_split * 0.01)
+        _, validate_items = split_train(_items, test_size=args.validate_split * 0.01)
 
     predictions = model.predict_generator(
-        generator=gen(validate_items, 1, points_per_ring, rings, training = False),
-        steps=len(validate_items))
+        generator=gen(validate_items, BATCH_SIZE, points_per_ring, rings, training = False),
+        steps=len(validate_items) // BATCH_SIZE)
 
     i = 0
     for item,prediction in zip(validate_items,predictions):
@@ -399,23 +424,7 @@ if args.test:
 else:
     train_items = get_items(provider_didi.get_tracklets(DATA_DIR, args.train_file, xml_filename=XML_TRACKLET_FILENAME))
     if args.validate_split is not None:
-        train_items, _validate_items = train_test_split(train_items, test_size=args.validate_split * 0.01)
-        # generators are executed concurrently and Diditracklets are not thread-safe, make sure
-        # no instance of tracklets are used concurrently... in other words: copy them
-        tracklet_to_tracklet = {}
-        validate_items = []
-        for item in _validate_items:
-            tracklet, frame = item
-            if tracklet in tracklet_to_tracklet:
-                _tracklet = tracklet_to_tracklet[tracklet]
-            else:
-                _tracklet = copy.copy(tracklet)
-                tracklet_to_tracklet[tracklet] = _tracklet
-            validate_items.append((_tracklet, frame))
-
-        print("unique train_items:    " + str(len(set(train_items))))
-        print("unique validate_items: " + str(len(set(validate_items))))
-
+        train_items, validate_items = split_train(train_items, test_size=args.validate_split * 0.01)
 
     print("Train items:    " + str(len(train_items)))
     print("Validate items: " + str(len(validate_items)))
@@ -435,5 +444,5 @@ else:
         steps_per_epoch  = len(train_items) // BATCH_SIZE,
         validation_data  = gen(validate_items, BATCH_SIZE, points_per_ring, rings, training = False),
         validation_steps = len(validate_items) // BATCH_SIZE,
-        epochs = 2000,)
-        #callbacks = [save_checkpoint, reduce_lr])
+        epochs = 2000,
+        callbacks = [save_checkpoint, reduce_lr])
