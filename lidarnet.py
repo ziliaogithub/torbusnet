@@ -19,6 +19,7 @@ from keras.layers.local import LocallyConnected1D
 from keras import backend as K
 from keras.callbacks import ModelCheckpoint, ReduceLROnPlateau
 from keras.models import load_model
+from keras.initializers import TruncatedNormal
 from torbus_layers import TorbusMaxPooling2D
 import tensorflow as tf
 from sklearn.model_selection import train_test_split
@@ -105,15 +106,15 @@ def get_model_recurrent(points_per_ring, rings, hidden_neurons = [64, 128, 256],
 
     l  = Concatenate(axis=-1)([l0,l1])
 
-    '''
     def SELU(x):
         alpha = 1.6732632423543772848170429916717
         scale = 1.0507009873554804934193349852946
         return scale * K.switch( K.greater_equal(x, 0.0), x, alpha * K.elu(x))
-    '''
 
+    prev_n = rings * 2
     for hidden_neuron in hidden_neurons:
-        l = GRU(hidden_neuron, return_sequences=True)(l)
+        l = GRU(hidden_neuron, activation=SELU, kernel_initializer='he_normal', return_sequences=True)(l)
+        prev_n = hidden_neuron
 
     l = Dense(1, activation='sigmoid')(l)
 
