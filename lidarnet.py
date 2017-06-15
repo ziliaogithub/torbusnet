@@ -72,6 +72,7 @@ parser.add_argument('-u', '--unsafe-training', action='store_true', help='Use un
 parser.add_argument('-lo', '--localizer', action='store_true', help='Use localizer instead of classifier')
 parser.add_argument('-w', '--worst-case-angle', type=float, default=1.6, help='Worst case angle in radians for localizer')
 parser.add_argument('-hn', '--hidden-neurons', nargs='+', type=int, default=[64, 128, 256], help='Hidden neurons for recurrent layers, e.g. -h 64 128 256')
+parser.add_argument('-j', '--joint', action='store_true', help='Joint training of classification and localization')
 
 args = parser.parse_args()
 
@@ -121,6 +122,9 @@ def smoothL1(y_true, y_pred):
         x = tf.where(x < HUBER_DELTA, 0.5 * x ** 2, HUBER_DELTA * (x - 0.5 * HUBER_DELTA))
         return  K.sum(x)
 
+def null_loss(y_true, y_pred):
+    return K.zeros_like(y_pred)
+
 def get_model_localizer(points_per_ring, rings, hidden_neurons):
     lidar_distances   = Input(shape=(points_per_ring, rings ))  # d i
     lidar_intensities = Input(shape=(points_per_ring, rings ))  # d i
@@ -165,7 +169,9 @@ def get_model_recurrent(points_per_ring, rings, hidden_neurons, localizer=False)
     l0  = Lambda(lambda x: x * 1/50. , output_shape=(points_per_ring, rings))(lidar_distances)
     l1  = Lambda(lambda x: x * 1/128., output_shape=(points_per_ring, rings))(lidar_intensities)
 
-    l  = Concatenate(axis=-1)([l0,l1])
+    o  = Concatenate(axis=-1, name='lidar')([l0,l1])
+
+    l  = o
 
     if localizer:
         for i, hidden_neuron in enumerate(hidden_neurons):
@@ -174,7 +180,7 @@ def get_model_recurrent(points_per_ring, rings, hidden_neurons, localizer=False)
             if (localizer is True) and (i == (len(hidden_neurons) - 1)):
                 _return_sequences = False
                 #_activation = 'linear'
-            l = GRU(hidden_neuron, activation = _activation, return_sequences=_return_sequences)(l)
+            l = GRU(hidden_neuron, activation = _activation, return_sequences=_return_sequences, name='class-GRU'+str(i))(l)
         #l = Dense(1)(l)
         distances = l
         #distances = Lambda(lambda x: x * 50.)(l)
@@ -183,13 +189,26 @@ def get_model_recurrent(points_per_ring, rings, hidden_neurons, localizer=False)
         for i, hidden_neuron in enumerate(hidden_neurons):
             _return_sequences = True
             _activation = 'tanh'
+            _name = 'class-GRU' + str(i)
             if i == (len(hidden_neurons) - 1):
                 _return_sequences = True
                 _activation = 'sigmoid'
-            l = GRU(hidden_neuron, activation = _activation, return_sequences=_return_sequences)(l)
-       # l = Dense(1, activation='sigmoid')(l)
+                _name = 'class'
+            l = GRU(hidden_neuron, activation = _activation, return_sequences=_return_sequences, name=_name)(l)
         classification = l
-        outputs = [classification]
+
+        o = Concatenate(axis=-1)([o, classification])
+
+        for i, hidden_neuron in enumerate(hidden_neurons):
+            _return_sequences = True
+            _activation = 'tanh'
+            if i == (len(hidden_neurons) - 1):
+                _return_sequences = False
+                _activation = 'relu'
+            o = GRU(hidden_neuron, activation = _activation, return_sequences=_return_sequences, name='loc-GRU'+str(i))(o)
+
+        distance = Lambda(lambda x: x * 25., name='distance')(o)
+        outputs = [classification, distance]
 
     model = Model(inputs=[lidar_distances, lidar_intensities], outputs=outputs)
     return model
@@ -420,9 +439,8 @@ def gen(items, batch_size, points_per_ring, rings, localizer_points_per_ring=Non
                             l_centroid_seqs[ii] = np.linalg.norm(centroids[ii, :2])
 
                     if localizer_points_per_ring is None:
-                        yield ([distance_seqs, intensity_seqs], classification_seqs) #)
+                        yield ([distance_seqs, intensity_seqs], [classification_seqs, distances]) #)
                     else:
-                        l_centroid_seqs /= 25.
                         yield ([l_distance_seqs, l_intensity_seqs], l_centroid_seqs) #)
 
                     i = 0
@@ -460,8 +478,13 @@ def split_train(train_items, test_size):
 
 if args.model:
     print("Loading model " + args.model)
+
+    # monkey-patch null_loss so model loads ok
+    # https://github.com/fchollet/keras/issues/5916#issuecomment-290344248
+    import keras.losses
+    keras.losses.null_loss = null_loss
+
     model = load_model(args.model)
-    model.summary()
     points_per_ring = model.get_input_shape_at(0)[0][1]
     nrings = model.get_input_shape_at(0)[0][2]
     print('Loaded model with ' + str(points_per_ring) + ' points per ring and ' + str(nrings) + ' rings')
@@ -477,7 +500,6 @@ else:
         model = get_model_recurrent(localizer_points_per_ring, len(rings), hidden_neurons=args.hidden_neurons, localizer=True)
     else:
         model = get_model_recurrent(localizer_points_per_ring if args.localizer else points_per_ring, len(rings), hidden_neurons=args.hidden_neurons, localizer=args.localizer)
-    model.summary()
 
 if (args.gpus > 1) or (len(args.batch_size) > 1):
     if len(args.batch_size) == 1:
@@ -503,9 +525,14 @@ if args.localizer:
     _loss = 'mse'
     _metrics = ['mse']
 else:
-    _loss = 'binary_crossentropy'
-    _metrics = ['acc']
+    _loss = ['binary_crossentropy', 'mse'] if args.joint else ['binary_crossentropy', null_loss]
+    _metrics = ['acc', 'mse']
 
+# set weights for the localizer part of the network according to args.joint
+for i, hn in enumerate(args.hidden_neurons):
+    model.get_layer(name='loc-GRU'+str(i)).trainable = args.joint
+
+model.summary()
 model.compile(loss=_loss, optimizer=RMSprop(lr=LEARNING_RATE, ), metrics = _metrics)
 
 if args.test:
@@ -554,8 +581,8 @@ else:
         monitor = 'val_loss'
     else:
         postfix = "-cla-rings_"+str(rings[0])+'_'+str(rings[-1]+1)
-        metric  = "-val_acc{val_acc:.4f}"
-        monitor = 'val_acc'
+        metric  = "-val_class_acc{val_class_acc:.4f}"
+        monitor = 'val_class_acc'
 
     save_checkpoint = ModelCheckpoint(
         "lidarnet"+postfix+"-epoch{epoch:02d}"+metric+".hdf5",
