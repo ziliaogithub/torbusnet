@@ -14,7 +14,7 @@ from keras.optimizers import Adam, Nadam, Adadelta, SGD
 from keras.layers.pooling import MaxPooling2D
 from keras.layers.advanced_activations import PReLU, LeakyReLU, ELU
 from keras.optimizers import Adam, Nadam, SGD, RMSprop
-from keras.layers.pooling import MaxPooling2D, MaxPooling1D
+from keras.layers.pooling import MaxPooling2D, MaxPooling1D, GlobalMaxPooling1D, AveragePooling1D
 from keras.layers.local import LocallyConnected1D
 from keras.callbacks import ModelCheckpoint, ReduceLROnPlateau
 from keras.models import load_model
@@ -72,7 +72,12 @@ parser.add_argument('-u', '--unsafe-training', action='store_true', help='Use un
 parser.add_argument('-lo', '--localizer', action='store_true', help='Use localizer instead of classifier')
 parser.add_argument('-w', '--worst-case-angle', type=float, default=1.6, help='Worst case angle in radians for localizer')
 parser.add_argument('-hn', '--hidden-neurons', nargs='+', type=int, default=[64, 128, 256], help='Hidden neurons for recurrent layers, e.g. -h 64 128 256')
-parser.add_argument('-j', '--joint', action='store_true', help='Joint training of classification and localization')
+parser.add_argument('-fc', '--freeze-class', action='store_true', help='Freeze classification layers during training')
+parser.add_argument('-fl', '--freeze-localizer', action='store_true', help='Freeze localizer layers during training')
+parser.add_argument('-wl', '--weight-localizer', type=float, default=0.001, help='Weight factor for localizer component of loss')
+parser.add_argument('-pn', '--pointnet', action='store_true', help='Train pointnet-based localizer')
+parser.add_argument('-pp', '--pointnet-points', type=int, default=1024, help='Pointnet points for regressor')
+
 
 args = parser.parse_args()
 
@@ -87,6 +92,7 @@ MAX_EPOCH      = args.max_epoch
 LEARNING_RATE  = args.learning_rate
 DATA_DIR       = args.data_dir
 MAX_DIST       = args.max_dist
+pointnet_points = None
 
 XML_TRACKLET_FILENAME_UNSAFE = 'tracklet_labels.xml'
 XML_TRACKLET_FILENAME_SAFE   = 'tracklet_labels_trainable.xml'
@@ -125,6 +131,39 @@ def smoothL1(y_true, y_pred):
 def null_loss(y_true, y_pred):
     return K.zeros_like(y_pred)
 
+def get_model_pointnet(REGRESSION_POINTS):
+
+    points = Input(shape=(REGRESSION_POINTS, 4))
+    act = 'relu'
+    ini = 'he_normal'
+    p = Lambda(lambda x: x * (1. / 25., 1. / 25., 1. / 3., 1. / 64.) - (0.5, 0., -0.5, 1.))(points)
+    p = Reshape(target_shape=(REGRESSION_POINTS, 4, 1), input_shape=(REGRESSION_POINTS, 4))(p)
+    p = Conv2D(filters=64,   kernel_size=(1, 4), activation=act, kernel_initializer=ini)(p)
+    p = Conv2D(filters=128,  kernel_size=(1, 1), dilation_rate=(1, 1), activation=act, kernel_initializer=ini)(p)
+    p = Conv2D(filters=256,  kernel_size=(1, 1), dilation_rate=(1, 1), activation=act, kernel_initializer=ini)(p)
+    p = Dropout(0.1)(p)
+    p = Conv2D(filters=256,  kernel_size=(1, 1), dilation_rate=(1, 1), activation=act, kernel_initializer=ini)(p)
+    p = Dropout(0.2)(p)
+    p = Conv2D(filters=2048, kernel_size=(1, 1), dilation_rate=(1, 1), activation=act, kernel_initializer=ini)(p)
+    p = Dropout(0.2)(p)
+
+    p = MaxPooling2D(pool_size=(REGRESSION_POINTS, 1), strides=None, padding='valid')(p)
+
+    p = Flatten()(p)
+    p = Dense(512, activation=act, kernel_initializer=ini)(p)
+    p = Dropout(0.1)(p)
+    p = Dense(256, activation=act, kernel_initializer=ini)(p)
+    p = Dropout(0.2)(p)
+    c = Dense(3,   activation=None)(p)
+    #s = Dense(3, activation=None)(p)
+
+    centroids  = Lambda(lambda x: x * (12.5, 1., 3.) - (-12.5, 0., 0.8))(c)  # tx ty tz
+    #dimensions = Lambda(lambda x: x * (3., 25., 25.) - (-1.5, 0., 0.))(s)  # h w l
+
+    model = Model(inputs=points, outputs=[centroids])
+    return model
+
+
 def get_model_localizer(points_per_ring, rings, hidden_neurons):
     lidar_distances   = Input(shape=(points_per_ring, rings ))  # d i
     lidar_intensities = Input(shape=(points_per_ring, rings ))  # d i
@@ -133,29 +172,62 @@ def get_model_localizer(points_per_ring, rings, hidden_neurons):
     l1  = Lambda(lambda x: x * 1/128., output_shape=(points_per_ring, rings))(lidar_intensities)
     l0  = Reshape((points_per_ring, rings, 1))(l0)
     l1  = Reshape((points_per_ring, rings, 1))(l1)
-
     l  = Concatenate(axis=-1)([l0,l1])
 
-    l = Conv2D(filters=hidden_neurons[0], kernel_size=(1, rings), activation='relu', padding='valid')(l)
+    scales = 7
+    n = 64
+    m = 8
+    #mn = points_per_ring // 2 - (m // 2)
+    #mm = points_per_ring // 2 + (m // 2)
 
-    prev_n = hidden_neurons[0]
-    for hidden_neuron in hidden_neurons:
-        l  = Conv2D(filters=hidden_neuron,   kernel_size=(3,1), activation='relu', padding='same')(l)
-        o  = l
-        l  = Conv2D(filters=hidden_neuron/2, kernel_size=(1,1), activation='relu', padding='same')(l)
-        l  = Conv2D(filters=hidden_neuron,   kernel_size=(3,1), activation='relu', padding='same')(l)
-        l  = Add()([l,o])
+    r = [ None ] * rings
+    f = [ None ] * (rings * scales)
+    s = [ None ] * scales
+    for ring in range(rings):
+        r[ring] = Lambda(lambda x: x[:, :, ring, :], output_shape=(points_per_ring, 1, 2))(l)
+        r[ring] = Reshape((points_per_ring, 2))(r[ring])
+        source = r[ring]
+        for scale in range(scales):
+            mn = int(points_per_ring / (2 ** (scale+1)))  - (m // 2)
+            mm = int(points_per_ring / (2 ** (scale+1)))  + (m // 2)
+            r[ring] = AveragePooling1D(pool_size=2**scale, strides=2**scale)(source) if scale > 0 else source
+            r[ring] = Conv1D(filters=n, kernel_size=3, activation='relu', name='r_r'+str(ring)+'s'+str(scale)+'a', padding='same')(r[ring])
+            r[ring] = Conv1D(filters=n//2, kernel_size=1, activation='relu', name='r_r'+str(ring)+'s'+str(scale)+'b', padding='same')(r[ring])
+            r[ring] = Conv1D(filters=n, kernel_size=3, activation='relu', name='r_r'+str(ring)+'s'+str(scale)+'c', padding='same')(r[ring])
 
-    l = Conv2D(filters=rings   , kernel_size=(1, 1), activation='relu', padding='valid')(l)
-    l = Conv2D(filters=rings//2, kernel_size=(1, 1), activation='relu', padding='valid')(l)
+            f[ring + scale * rings] = Lambda(lambda x: x[:, mn:mm, :], output_shape=(m, n), name='f_r'+str(ring)+'s'+str(scale))(r[ring])
 
-    l = MaxPooling2D(pool_size=(2,1), strides=(2,1))(l)
-    l = Flatten()(l)
-    l = Dense(64, activation='relu')(l)
-    l = Dense(32, activation='relu')(l)
-    l = Dense(16, activation='relu')(l)
-    l = Dense(1)(l)
-    distances = Lambda(lambda x: x * 50.)(l)
+            if (scale == 1) and (ring ==0):
+                print(f[ring + scale * rings])
+                print(r[ring])
+
+            #r[ring] = MaxPooling1D(pool_size=2, strides=2, padding='valid')(r[ring])
+            if (scale == 1) and (ring ==0):
+                print(r[ring])
+
+            if ring == 0:
+                s[scale] = f[ring + scale * rings]
+            else:
+                s[scale] = Concatenate(axis=-1, name='s_s'+str(scale) if (ring==rings-1) else None )([s[scale], f[ring + scale * rings]])
+                #print(s[scale])
+
+    print(s)
+
+    for scale in range(scales):
+        s[scale] = Flatten()(s[scale])
+        s[scale] = Dense( 32, activation='relu')(s[scale])
+        s[scale] = Dense( 32, activation='relu')(s[scale])
+        s[scale] = Dense(  1, activation='relu')(s[scale])
+
+    ss = s[0]
+    for scale in range(scales):
+        if scale > 0:
+            ss = Concatenate(axis=-1)([ss, s[scale]])
+    ss = Reshape((scales, 1))(ss)
+    distances = GlobalMaxPooling1D()(ss)
+    print(distances)
+
+    distances = Lambda(lambda x: x * 25.)(distances)
     outputs = [distances]
 
     model = Model(inputs=[lidar_distances, lidar_intensities], outputs=outputs)
@@ -164,12 +236,14 @@ def get_model_localizer(points_per_ring, rings, hidden_neurons):
 
 def get_model_recurrent(points_per_ring, rings, hidden_neurons, localizer=False):
     lidar_distances   = Input(shape=(points_per_ring, rings ))  # d i
+    lidar_heights     = Input(shape=(points_per_ring, rings ))  # d i
     lidar_intensities = Input(shape=(points_per_ring, rings ))  # d i
 
-    l0  = Lambda(lambda x: x * 1/50. , output_shape=(points_per_ring, rings))(lidar_distances)
-    l1  = Lambda(lambda x: x * 1/128., output_shape=(points_per_ring, rings))(lidar_intensities)
+    l0  = Lambda(lambda x: x * 1/50.  - 0.5, output_shape=(points_per_ring, rings))(lidar_distances)
+    l1  = Lambda(lambda x: x * 1/3.   + 0.5, output_shape=(points_per_ring, rings))(lidar_heights)
+    l2  = Lambda(lambda x: x * 1/128. - 0.5, output_shape=(points_per_ring, rings))(lidar_intensities)
 
-    o  = Concatenate(axis=-1, name='lidar')([l0,l1])
+    o  = Concatenate(axis=-1, name='lidar')([l0, l1, l2])
 
     l  = o
 
@@ -188,29 +262,37 @@ def get_model_recurrent(points_per_ring, rings, hidden_neurons, localizer=False)
     else:
         for i, hidden_neuron in enumerate(hidden_neurons):
             _return_sequences = True
-            _activation = 'tanh'
+            #_activation = 'tanh'
+            _activation = 'relu'
+            _kernel_initializer = 'he_normal'
             _name = 'class-GRU' + str(i)
             if i == (len(hidden_neurons) - 1):
                 _return_sequences = True
                 _activation = 'sigmoid'
+                _kernel_initializer = 'he_normal'
                 _name = 'class'
-            l = GRU(hidden_neuron, activation = _activation, return_sequences=_return_sequences, name=_name)(l)
+            l = GRU(hidden_neuron, activation = _activation, return_sequences=_return_sequences, name=_name, kernel_initializer = _kernel_initializer)(l)
         classification = l
 
-        o = Concatenate(axis=-1)([o, classification])
+        o = Concatenate(axis=-1)([l0, l1, classification])
 
         for i, hidden_neuron in enumerate(hidden_neurons):
             _return_sequences = True
-            _activation = 'tanh'
+            _activation = 'relu'
+            _kernel_initializer = 'he_normal'
             if i == (len(hidden_neurons) - 1):
                 _return_sequences = False
-                _activation = 'relu'
-            o = GRU(hidden_neuron, activation = _activation, return_sequences=_return_sequences, name='loc-GRU'+str(i))(o)
+                _activation = 'linear'
+                _kernel_initializer = 'he_normal'
+                hidden_neuron = 3
+            o = GRU(hidden_neuron, activation = _activation, return_sequences=_return_sequences, name='loc-GRU'+str(i), kernel_initializer = _kernel_initializer)(o)
 
-        distance = Lambda(lambda x: x * 25., name='distance')(o)
+#        distance = Lambda(lambda x: x * 25., name='distance', output_shape=(1,))(o)
+        distance = Lambda(lambda x: x * (25., 25., 3.) + (25.,25.,-1.5), name='centroid', output_shape=(3,))(o)
+
         outputs = [classification, distance]
 
-    model = Model(inputs=[lidar_distances, lidar_intensities], outputs=outputs)
+    model = Model(inputs=[lidar_distances, lidar_heights, lidar_intensities], outputs=outputs)
     return model
 
 def save_lidar_plot(lidar_distance, box, filename, highlight=None):
@@ -241,20 +323,37 @@ def save_lidar_plot(lidar_distance, box, filename, highlight=None):
     plt.clf()
     return
 
+def minmax_yaw(box):
+    # initialize with worst case to make sure they get updated
+    min_yaw = np.pi
+    max_yaw = -np.pi
+
+    for b in box[:4]:
+        yaw = np.arctan2(b[1], b[0])
+        if yaw > max_yaw:
+            max_yaw = yaw
+        if yaw < min_yaw:
+            min_yaw = yaw
+    return min_yaw, max_yaw
+
 # if localizer_points_per_ring is a number => yield localizer semantics
-def gen(items, batch_size, points_per_ring, rings, localizer_points_per_ring=None, training=True, ):
+def gen(items, batch_size, points_per_ring, rings, pointnet_points, localizer_points_per_ring=None, training=True):
 
     angles         = np.empty((batch_size, 1), dtype=np.float32)
     distances      = np.empty((batch_size, 1), dtype=np.float32)
     centroids      = np.empty((batch_size, 3), dtype=np.float32)
     boxes          = np.empty((batch_size, 8, 3), dtype=np.float32)
 
-    # inputs classifier
-    distance_seqs  = np.empty((batch_size, points_per_ring, len(rings)), dtype=np.float32)
-    intensity_seqs = np.empty((batch_size, points_per_ring, len(rings)), dtype=np.float32)
-
-    # classifier label (output): 0 if point does not belong to car, 1 otherwise
-    classification_seqs  = np.empty((batch_size, points_per_ring,1), dtype=np.float32)
+    if pointnet_points is None:
+        # inputs classifier RNN
+        distance_seqs  = np.empty((batch_size, points_per_ring, len(rings)), dtype=np.float32)
+        height_seqs    = np.empty((batch_size, points_per_ring, len(rings)), dtype=np.float32)
+        intensity_seqs = np.empty((batch_size, points_per_ring, len(rings)), dtype=np.float32)
+        # classifier label (output): 0 if point does not belong to car, 1 otherwise
+        classification_seqs = np.empty((batch_size, points_per_ring, 1), dtype=np.float32)
+    else:
+    # inputs classifier pointnet
+        lidars         = np.empty((batch_size, pointnet_points, 4), dtype=np.float32)
 
     if localizer_points_per_ring is not None:
         l_distance_seqs  = np.empty((batch_size, localizer_points_per_ring, len(rings)), dtype=np.float32)
@@ -337,113 +436,139 @@ def gen(items, batch_size, points_per_ring, rings, localizer_points_per_ring=Non
                         h_current[:] = h_target[:]
 
                     # random rotation along Z axis
-                    random_yaw = (np.random.random_sample() * 2. - 1.) * np.pi
+
+                    random_yaw = (np.random.random_sample() * 2. - 1.) * np.pi if pointnet_points is None else 0.
                     centroid   = point_utils.rotZ(centroid, random_yaw)
                     box        = point_utils.rotZ(box, random_yaw)
 
-                    flipX      = np.random.randint(2)
-                    flipY      = np.random.randint(2)
+                    flipX      = np.random.randint(2) if pointnet_points is None else 0.
+                    flipY      = np.random.randint(2) if pointnet_points is None else 0.
                     if flipX:
                         centroid[0] = -centroid[0]
                         box[:,0]    = -box[:,0]
                     if flipY:
                         centroid[1] = -centroid[1]
-                        box[:, 1] = -box[:, 1]
+                        box[:, 1]   = -box[:, 1]
 
-                    lidar_d_i  = tracklet.get_lidar_rings(frame,
-                                                          rings = rings,
-                                                          points_per_ring = points_per_ring,
-                                                          clip=(0., 50.),
-                                                          rotate = random_yaw,
-                                                          flipX = flipX, flipY = flipY) #
-
-                    # initialize with worst case to make sure they get updated
-                    min_yaw =  np.pi
-                    max_yaw = -np.pi
-
+                    min_yaw, max_yaw = minmax_yaw(box)
+                    angle_span = np.absolute(min_yaw - max_yaw)
                     this_max_angle = False
 
-                    for b in box[:4]:
-                        yaw = np.arctan2(b[1], b[0])
-                        if yaw > max_yaw:
-                            max_yaw = yaw
-                        if yaw < min_yaw:
-                            min_yaw = yaw
-
-                    angle_span = np.absolute(min_yaw-max_yaw)
-
                     # car is between two frames, ignore it for now
-                    if  angle_span >= np.pi:
+                    if angle_span >= np.pi:
                         skip = True
                     elif angle_span > max_angle_span:
                         max_angle_span = angle_span
-
-                        #print("Max angle span:", max_angle_span)
-                        #print(tracklet.xml_path, frame)
+                        # print("Max angle span:", max_angle_span)
+                        # print(tracklet.xml_path, frame)
                         this_max_angle = True
 
+                    if skip is False:
+                        if pointnet_points is None:
+                            lidar_d_i  = tracklet.get_lidar_rings(frame,
+                                                                  rings = rings,
+                                                                  points_per_ring = points_per_ring,
+                                                                  clip=(0., 50.),
+                                                                  rotate = random_yaw,
+                                                                  flipX = flipX, flipY = flipY) #
+                        else:
+                            lidar = tracklet.get_lidar(frame, pointnet_points, angle_cone=(min_yaw, max_yaw), rings=rings)
+                            if lidar.shape[0] == 0:
+                                skip = True
+
+
             else:
-                #print(tracklet, frame)
-                lidar_d_i = tracklet.get_lidar_rings(frame,
-                                                     rings = rings,
-                                                     points_per_ring = points_per_ring,
-                                                     clip = (0.,50.))  #
+                # validation
+                if pointnet_points is None:
+                    lidar_d_i = tracklet.get_lidar_rings(frame,
+                                                         rings = rings,
+                                                         points_per_ring = points_per_ring,
+                                                         clip = (0.,50.))
+                else:
+                    min_yaw, max_yaw = minmax_yaw(box)
+                    lidar = tracklet.get_lidar(frame, pointnet_points, angle_cone=(min_yaw, max_yaw), rings=rings)
 
             if skip is False:
 
-                for ring in rings:
-                    distance_seqs [i, :, ring - rings[0]] = lidar_d_i[ring - rings[0], :, 0]
-                    intensity_seqs[i, :, ring - rings[0]] = lidar_d_i[ring - rings[0], :, 1]
+                if pointnet_points is not None:
+                    mean_yaw = (max_yaw + min_yaw) / 2.
+                    #print('mean', mean_yaw)
+
+                    lidar = point_utils.rotZ(lidar, mean_yaw)
+                    #print(np.arctan2(centroid[1], centroid[0]))
+                    centroid = point_utils.rotZ(centroid, mean_yaw)
+                    #print(np.arctan2(centroid[1], centroid[0]))
+
+                    box = point_utils.rotZ(box, mean_yaw)
+                    lidars[i] = lidar[:,:4]
 
                 angles[i]    = np.arctan2(centroid[1], centroid[0])
+                #print(angles[i])
                 centroids[i] = centroid
                 distances[i] = distance
                 boxes[i]     = box
 
-                if this_max_angle:
-                    save_lidar_plot(distance_seqs[i], box, "train-max_angle.png")
-                    this_max_angle = False
+                if pointnet_points is None:
 
-                i += 1
-                if i == batch_size:
+                    for ring in rings:
+                        distance_seqs [i, :, ring - rings[0]] = lidar_d_i[ring - rings[0], :, 0]
+                        height_seqs   [i, :, ring - rings[0]] = lidar_d_i[ring - rings[0], :, 1]
+                        intensity_seqs[i, :, ring - rings[0]] = lidar_d_i[ring - rings[0], :, 2]
 
-                    seen += batch_size
-                    if seen > 1000:
-                        seen = 0
-                        save_lidar_plot(distance_seqs[0], boxes[0], "train.png")
+                    if this_max_angle:
+                        save_lidar_plot(distance_seqs[i], box, "train-max_angle.png")
+                        this_max_angle = False
 
-                    for ii in range(batch_size):
+                    i += 1
+                    if i == batch_size:
 
-                        max_yaw = -np.pi
-                        min_yaw =  np.pi
-                        for b in boxes[ii][:4]:
-                            yaw = np.arctan2(b[1], b[0])
-                            if yaw > max_yaw:
-                                max_yaw = yaw
-                            if yaw < min_yaw:
-                                min_yaw = yaw
-                        _min_yaw = int(points_per_ring * (min_yaw + np.pi) / (2 * np.pi))
-                        _max_yaw = int(points_per_ring * (max_yaw + np.pi) / (2 * np.pi))
+                        seen += batch_size
+                        if seen > 1000:
+                            seen = 0
+                            save_lidar_plot(distance_seqs[0], boxes[0], "train.png")
+
+                        for ii in range(batch_size):
+
+                            min_yaw, max_yaw = minmax_yaw(boxes[ii])
+                            _min_yaw = int(points_per_ring * (min_yaw + np.pi) / (2 * np.pi))
+                            _max_yaw = int(points_per_ring * (max_yaw + np.pi) / (2 * np.pi))
+
+                            if localizer_points_per_ring is None:
+                                classification_seqs[ii, :] = 0.
+                                classification_seqs[ii, _min_yaw:_max_yaw+1] = 1. # distances[ii] #for classification
+                            else:
+                                _yaw_span = _max_yaw - _min_yaw
+                                l_distance_seqs[ii, :, :]  = 0.
+                                l_intensity_seqs[ii, :, :] = 0.
+
+                                for ring in rings:
+                                    mn = int(localizer_points_per_ring / 2. - (_yaw_span / 2.))
+                                    mm = mn + _yaw_span
+
+                                    l_distance_seqs [ii, mn:mm, ring - rings[0]] = distance_seqs [ii, _min_yaw:_max_yaw, ring - rings[0]]
+                                    l_intensity_seqs[ii, mn:mm, ring - rings[0]] = intensity_seqs[ii, _min_yaw:_max_yaw, ring - rings[0]]
+
+                                l_centroid_seqs[ii] = np.linalg.norm(centroids[ii, :2])
 
                         if localizer_points_per_ring is None:
-                            classification_seqs[ii, :] = 0.
-                            classification_seqs[ii, _min_yaw:_max_yaw+1] = 1. # distances[ii] #for classification
+    #                        yield ([distance_seqs, intensity_seqs], [classification_seqs, distances]) #)
+                            yield ([distance_seqs, height_seqs, intensity_seqs], [classification_seqs, centroids]) #)
+
                         else:
-                            _yaw_span = _max_yaw - _min_yaw
-                            for ring in rings:
-                                l_distance_seqs [ii, :_yaw_span+1, ring - rings[0]] = distance_seqs [ii, _min_yaw:_max_yaw+1, ring - rings[0]]
-                                l_intensity_seqs[ii, :_yaw_span+1, ring - rings[0]] = intensity_seqs[ii, _min_yaw:_max_yaw+1, ring - rings[0]]
-                                l_distance_seqs [ii, _yaw_span+1:, ring - rings[0]] = 0.
-                                l_intensity_seqs[ii, _yaw_span+1:, ring - rings[0]] = 0.
+                            yield ([l_distance_seqs, l_intensity_seqs], l_centroid_seqs) #)
 
-                            l_centroid_seqs[ii] = np.linalg.norm(centroids[ii, :2])
+                        i = 0
 
-                    if localizer_points_per_ring is None:
-                        yield ([distance_seqs, intensity_seqs], [classification_seqs, distances]) #)
-                    else:
-                        yield ([l_distance_seqs, l_intensity_seqs], l_centroid_seqs) #)
+                else:
+                    # pointnet
 
-                    i = 0
+                    i += 1
+                    if i == batch_size:
+                        yield ([lidars], [centroids]) #)
+                        #if training is False:
+                        #    print(centroids[0])
+                        i = 0
+
 
 def get_items(tracklets, unsafe=False):
     items = []
@@ -495,11 +620,14 @@ if args.model:
 else:
     points_per_ring = args.points_per_ring
     localizer_points_per_ring = int(np.ceil(points_per_ring * args.worst_case_angle / (2 * np.pi ))) if args.localizer else None
-
-    if args.localizer:
-        model = get_model_recurrent(localizer_points_per_ring, len(rings), hidden_neurons=args.hidden_neurons, localizer=True)
+    if args.pointnet:
+        pointnet_points = args.pointnet_points
+        model = get_model_pointnet(pointnet_points)
     else:
-        model = get_model_recurrent(localizer_points_per_ring if args.localizer else points_per_ring, len(rings), hidden_neurons=args.hidden_neurons, localizer=args.localizer)
+        if args.localizer:
+            model = get_model_localizer(localizer_points_per_ring, len(rings), hidden_neurons=args.hidden_neurons)
+        else:
+            model = get_model_recurrent(localizer_points_per_ring if args.localizer else points_per_ring, len(rings), hidden_neurons=args.hidden_neurons, localizer=args.localizer)
 
 if (args.gpus > 1) or (len(args.batch_size) > 1):
     if len(args.batch_size) == 1:
@@ -521,19 +649,25 @@ if args.validate_split is None:
     else:
         validate_items = get_items(provider_didi.get_tracklets(DATA_DIR, args.validate_file, xml_filename=XML_TRACKLET_FILENAME), unsafe=UNSAFE_TRAINING)
 
-if args.localizer:
+if args.localizer or args.pointnet:
     _loss = 'mse'
     _metrics = ['mse']
 else:
-    _loss = ['binary_crossentropy', 'mse'] if args.joint else ['binary_crossentropy', null_loss]
-    _metrics = ['acc', 'mse']
+    _class_loss = 'binary_crossentropy' if not args.freeze_class     else null_loss
+    _loc_loss   = 'mse'                 if not args.freeze_localizer else null_loss
+    _loss = [_class_loss, _loc_loss]
+    _metrics = { 'class':'acc', 'distance':'mse'}
 
-# set weights for the localizer part of the network according to args.joint
-for i, hn in enumerate(args.hidden_neurons):
-    model.get_layer(name='loc-GRU'+str(i)).trainable = args.joint
+if not args.localizer and not args.pointnet:
+    # set weights for the localizer part of the network according to args.joint
+    for i, hn in enumerate(args.hidden_neurons):
+        model.get_layer(name='loc-GRU'+str(i)).trainable = not args.freeze_localizer
+
+        _class_name = 'class-GRU'+str(i) if i != (len(args.hidden_neurons) -1) else 'class'
+        model.get_layer(name=_class_name).trainable = not args.freeze_class
 
 model.summary()
-model.compile(loss=_loss, optimizer=RMSprop(lr=LEARNING_RATE, ), metrics = _metrics)
+model.compile(loss=_loss, optimizer=RMSprop(lr=LEARNING_RATE, ), metrics = _metrics, loss_weights = [ 1., args.weight_localizer] if not args.localizer and not args.pointnet else [1.])
 
 if args.test:
     distance_seq = np.empty((points_per_ring, len(rings)), dtype=np.float32)
@@ -542,7 +676,7 @@ if args.test:
         _, validate_items = split_train(_items, test_size=args.validate_split * 0.01)
 
     predictions = model.predict_generator(
-        generator=gen(validate_items, BATCH_SIZE, points_per_ring, rings, training = False),
+        generator=gen(validate_items, BATCH_SIZE, points_per_ring, rings, args.pointnet_points, training = False),
         steps=len(validate_items) // BATCH_SIZE)
 
     i = 0
@@ -575,14 +709,20 @@ else:
     print("Train items:    " + str(len(train_items)))
     print("Validate items: " + str(len(validate_items)))
 
-    if args.localizer:
+    if args.localizer or args.pointnet:
         postfix = "-loc-rings_"+str(rings[0])+'_'+str(rings[-1]+1)
         metric  = "-val_loss{val_loss:.4f}"
         monitor = 'val_loss'
     else:
         postfix = "-cla-rings_"+str(rings[0])+'_'+str(rings[-1]+1)
-        metric  = "-val_class_acc{val_class_acc:.4f}"
-        monitor = 'val_class_acc'
+        metric  = ""
+        if not args.freeze_class:
+            metric  += "-val_class_acc{val_class_acc:.4f}"
+            monitor = 'val_class_acc'
+        if not args.freeze_localizer:
+            metric  += "-val_centroid_loss{val_centroid_loss:.4f}"
+            monitor = 'val_centroid_loss'
+
 
     save_checkpoint = ModelCheckpoint(
         "lidarnet"+postfix+"-epoch{epoch:02d}"+metric+".hdf5",
@@ -592,9 +732,9 @@ else:
     reduce_lr = ReduceLROnPlateau(monitor=monitor, factor=0.5, patience=10, min_lr=1e-7, epsilon = 0.0001, verbose=1)
 
     model.fit_generator(
-        gen(train_items, BATCH_SIZE, points_per_ring, rings, localizer_points_per_ring),
+        gen(train_items, BATCH_SIZE, points_per_ring, rings, pointnet_points, localizer_points_per_ring),
         steps_per_epoch  = len(train_items) // BATCH_SIZE,
-        validation_data  = gen(validate_items, BATCH_SIZE, points_per_ring, rings, localizer_points_per_ring, training = False),
+        validation_data  = gen(validate_items, BATCH_SIZE, points_per_ring, rings, pointnet_points, localizer_points_per_ring, training = False),
         validation_steps = len(validate_items) // BATCH_SIZE,
         epochs = args.max_epoch,
         callbacks = [save_checkpoint, reduce_lr])

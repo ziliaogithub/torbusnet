@@ -81,14 +81,9 @@ def get_model_regression():
     ps = Dense( 32, activation='relu')(p)
     s = Dense(3, activation=None)(ps)
 
-<<<<<<< Updated upstream
-    centroids  = Lambda(lambda x: x * (10.,10., 3.) - (0., 0., -1.5))(c) # tx ty tz
-    dimensions = Lambda(lambda x: x * ( 3.,10.,10.) - (-1.5, 0., 0.))(s) # h w l
-=======
     centroids  = Lambda(lambda x: x * (25.,25., 3.) - (0., 0., -1.5))(c) # tx ty tz
     dimensions = Lambda(lambda x: x * ( 3.,25.,25.) - (-1.5, 0., 0.))(s) # h w l
 
->>>>>>> Stashed changes
     model = Model(inputs=points, outputs=[centroids, dimensions])
     return model
 
@@ -116,30 +111,17 @@ def get_model_classification():
     p = Conv2D(filters= 128, kernel_size=(1, 1), activation='relu')(p)
     p = Conv2D(filters= 128, kernel_size=(1, 1), activation='relu')(p)
     p = Conv2D(filters= 128, kernel_size=(1, 1), activation='relu')(p)
-<<<<<<< Updated upstream
-    p = Conv2D(filters= 512, kernel_size=(1, 1), activation='relu')(p)
-=======
     p = Conv2D(filters= 256, kernel_size=(1, 1), activation='relu')(p)
->>>>>>> Stashed changes
 
     p = MaxPooling2D(pool_size=(CLASSIFICATION_POINTS, 1), strides=None, padding='valid')(p)
 
-<<<<<<< Updated upstream
-    p = Flatten()(p)
-    p = Dense(256, activation='relu')(p)
-    p = Dense(128, activation='relu')(p)
-    p = Dropout(0.2)(p)
-    p = Dense(64, activation='relu')(p)
-    p = Dropout(0.2)(p)
-    c = Dense(1, activation='sigmoid')(p)
-=======
+
     p  = Flatten()(p)
     p  = Dense(128, activation='relu')(p)
 
     #p = Dropout(0.3)(p)
     p = Dense(64, activation='relu')(p)
     p = Dense(32, activation='relu')(p)
->>>>>>> Stashed changes
 
     #p = Dropout(0.3)(p)
     classification = Dense(1, activation='sigmoid', name='classification')(p)
