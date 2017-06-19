@@ -14,7 +14,7 @@ from keras.optimizers import Adam, Nadam, Adadelta, SGD
 from keras.layers.pooling import MaxPooling2D
 from keras.layers.advanced_activations import PReLU, LeakyReLU, ELU
 from keras.optimizers import Adam, Nadam, SGD, RMSprop
-from keras.layers.pooling import MaxPooling2D, MaxPooling1D, GlobalMaxPooling1D, AveragePooling1D
+from keras.layers.pooling import MaxPooling2D, MaxPooling3D, MaxPooling1D, GlobalMaxPooling1D, AveragePooling1D
 from keras.layers.local import LocallyConnected1D
 from keras.callbacks import ModelCheckpoint, ReduceLROnPlateau
 from keras.models import load_model
@@ -165,18 +165,30 @@ def get_model_pointnet(REGRESSION_POINTS):
 
 
 def get_model_localizer(points_per_ring, rings, hidden_neurons):
-    lidar_distances   = Input(shape=(points_per_ring, rings ))  # d i
-    lidar_intensities = Input(shape=(points_per_ring, rings ))  # d i
+    lidar_distances = Input(shape=(points_per_ring, rings))  # d i
+    lidar_heights = Input(shape=(points_per_ring, rings))  # d i
+    lidar_intensities = Input(shape=(points_per_ring, rings))  # d i
 
-    l0  = Lambda(lambda x: x * 1/50. , output_shape=(points_per_ring, rings))(lidar_distances)
-    l1  = Lambda(lambda x: x * 1/128., output_shape=(points_per_ring, rings))(lidar_intensities)
+    l0 = Lambda(lambda x: x * 1 / 50.  - 0.5, output_shape=(points_per_ring, rings))(lidar_distances)
+    l1 = Lambda(lambda x: x * 1 / 3.   + 0.5, output_shape=(points_per_ring, rings))(lidar_heights)
+    l2 = Lambda(lambda x: x * 1 / 128. - 0.5, output_shape=(points_per_ring, rings))(lidar_intensities)
+
     l0  = Reshape((points_per_ring, rings, 1))(l0)
     l1  = Reshape((points_per_ring, rings, 1))(l1)
-    l  = Concatenate(axis=-1)([l0,l1])
+    l2  = Reshape((points_per_ring, rings, 1))(l2)
 
-    scales = 7
-    n = 64
-    m = 8
+    l  = Concatenate(axis=-1)([l0,l1,l2])
+
+    scales = 6
+    n = 32
+    nn = 64
+    m = 4
+
+    #l  = Conv2D(filters=nn//4, kernel_size=(1,1), padding='valid')(l)
+    #l  = Conv2D(filters=nn//2, kernel_size=(1,1), padding='valid')(l)
+    l  = Conv2D(filters=nn,    kernel_size=(1,1), padding='valid')(l)
+
+    #rings = 1
     #mn = points_per_ring // 2 - (m // 2)
     #mm = points_per_ring // 2 + (m // 2)
 
@@ -184,16 +196,26 @@ def get_model_localizer(points_per_ring, rings, hidden_neurons):
     f = [ None ] * (rings * scales)
     s = [ None ] * scales
     for ring in range(rings):
-        r[ring] = Lambda(lambda x: x[:, :, ring, :], output_shape=(points_per_ring, 1, 2))(l)
-        r[ring] = Reshape((points_per_ring, 2))(r[ring])
+        r[ring] = Lambda(lambda x: x[:, :, ring, :], output_shape=(points_per_ring, 1, nn))(l)
+        r[ring] = Reshape((points_per_ring, nn))(r[ring])
         source = r[ring]
         for scale in range(scales):
-            mn = int(points_per_ring / (2 ** (scale+1)))  - (m // 2)
-            mm = int(points_per_ring / (2 ** (scale+1)))  + (m // 2)
-            r[ring] = AveragePooling1D(pool_size=2**scale, strides=2**scale)(source) if scale > 0 else source
+
+            factor = int((scale+1)*points_per_ring/(15*scales)) if scale > 0 else 1
+            mn = int(points_per_ring / (2*factor)) - (m // 2)
+            mm = int(points_per_ring / (2*factor)) + (m // 2)
+            print(factor, mn, mm)
+            r[ring] = AveragePooling1D(pool_size=factor, strides=factor, padding='valid')(source) if scale > 0 else source
+            print('after avgpool', r[ring])
             r[ring] = Conv1D(filters=n, kernel_size=3, activation='relu', name='r_r'+str(ring)+'s'+str(scale)+'a', padding='same')(r[ring])
             r[ring] = Conv1D(filters=n//2, kernel_size=1, activation='relu', name='r_r'+str(ring)+'s'+str(scale)+'b', padding='same')(r[ring])
             r[ring] = Conv1D(filters=n, kernel_size=3, activation='relu', name='r_r'+str(ring)+'s'+str(scale)+'c', padding='same')(r[ring])
+            r[ring] = Conv1D(filters=n, kernel_size=3, activation='relu', name='r_r'+str(ring)+'s'+str(scale)+'d', padding='same')(r[ring])
+            r[ring] = Conv1D(filters=n//2, kernel_size=1, activation='relu', name='r_r'+str(ring)+'s'+str(scale)+'e', padding='same')(r[ring])
+            r[ring] = Conv1D(filters=n, kernel_size=3, activation='relu', name='r_r'+str(ring)+'s'+str(scale)+'f', padding='same')(r[ring])
+            r[ring] = Conv1D(filters=n, kernel_size=3, activation='relu', name='r_r'+str(ring)+'s'+str(scale)+'g', padding='same')(r[ring])
+            r[ring] = Conv1D(filters=n//2, kernel_size=1, activation='relu', name='r_r'+str(ring)+'s'+str(scale)+'h', padding='same')(r[ring])
+            r[ring] = Conv1D(filters=n, kernel_size=3, activation='relu', name='r_r'+str(ring)+'s'+str(scale)+'i', padding='same')(r[ring])
 
             f[ring + scale * rings] = Lambda(lambda x: x[:, mn:mm, :], output_shape=(m, n), name='f_r'+str(ring)+'s'+str(scale))(r[ring])
 
@@ -206,38 +228,62 @@ def get_model_localizer(points_per_ring, rings, hidden_neurons):
                 print(r[ring])
 
             if ring == 0:
-                s[scale] = f[ring + scale * rings]
+                print(f[ring + scale * rings])
+                s[scale] = Reshape((m, 1, n))(f[ring + scale * rings])
             else:
-                s[scale] = Concatenate(axis=-1, name='s_s'+str(scale) if (ring==rings-1) else None )([s[scale], f[ring + scale * rings]])
-                #print(s[scale])
+                s[scale] = Concatenate(axis=-2, name='s_s'+str(scale) if (ring==rings-1) else None )([s[scale], Reshape((m, 1, n))(f[ring + scale * rings])])
 
     print(s)
 
     for scale in range(scales):
+        if scale == 0:
+            all_scales = Reshape((m , rings, 1, n))(s[scale])
+        else:
+            all_scales = Concatenate(axis=-2)([all_scales, Reshape((m , rings, 1, n))(s[scale])])
+
+    print(all_scales)
+    all_scales = MaxPooling3D(pool_size=(1, 1, scales))(all_scales)
+    print(all_scales)
+
+    ss = Flatten()(all_scales)
+    #ss = Dense( 512, activation='relu')(ss)
+    ss = Dense( 128, activation='relu')(ss)
+    ss = Dense( 128, activation='relu')(ss)
+    ss = Dense(   1, activation='relu')(ss)
+    distances = ss
+
+    '''
+    for scale in range(scales):
         s[scale] = Flatten()(s[scale])
         s[scale] = Dense( 32, activation='relu')(s[scale])
         s[scale] = Dense( 32, activation='relu')(s[scale])
-        s[scale] = Dense(  1, activation='relu')(s[scale])
+        s[scale] = Dense( 32, activation='relu')(s[scale])
 
     ss = s[0]
     for scale in range(scales):
         if scale > 0:
             ss = Concatenate(axis=-1)([ss, s[scale]])
-    ss = Reshape((scales, 1))(ss)
-    distances = GlobalMaxPooling1D()(ss)
+    #ss = Flatten()(ss)'
+    ss = Dense(32, activation='relu')(ss)
+    ss = Dense(32, activation='relu')(ss)
+    ss = Dense( 1, activation='relu')(ss)
+
+    #ss = Reshape((scales, 1))(ss)
+    distances = ss #GlobalMaxPooling1D()(ss)
+    '''
     print(distances)
 
     distances = Lambda(lambda x: x * 25.)(distances)
     outputs = [distances]
 
-    model = Model(inputs=[lidar_distances, lidar_intensities], outputs=outputs)
+    model = Model(inputs=[lidar_distances, lidar_heights, lidar_intensities], outputs=outputs)
     return model
 
 
 def get_model_recurrent(points_per_ring, rings, hidden_neurons, localizer=False):
-    lidar_distances   = Input(shape=(points_per_ring, rings ))  # d i
-    lidar_heights     = Input(shape=(points_per_ring, rings ))  # d i
-    lidar_intensities = Input(shape=(points_per_ring, rings ))  # d i
+    lidar_distances   = Input(shape=(points_per_ring, rings ))
+    lidar_heights     = Input(shape=(points_per_ring, rings ))
+    lidar_intensities = Input(shape=(points_per_ring, rings ))
 
     l0  = Lambda(lambda x: x * 1/50.  - 0.5, output_shape=(points_per_ring, rings))(lidar_distances)
     l1  = Lambda(lambda x: x * 1/3.   + 0.5, output_shape=(points_per_ring, rings))(lidar_heights)
@@ -247,50 +293,26 @@ def get_model_recurrent(points_per_ring, rings, hidden_neurons, localizer=False)
 
     l  = o
 
-    if localizer:
-        for i, hidden_neuron in enumerate(hidden_neurons):
+    for i, hidden_neuron in enumerate(hidden_neurons):
+        _return_sequences = True
+        _activation = 'tanh'
+        #_activation = 'relu'
+        _kernel_initializer = 'he_normal'
+        _name = 'class-GRU' + str(i)
+        if i == (len(hidden_neurons) - 1):
             _return_sequences = True
-            _activation = 'tanh'
-            if (localizer is True) and (i == (len(hidden_neurons) - 1)):
-                _return_sequences = False
-                #_activation = 'linear'
-            l = GRU(hidden_neuron, activation = _activation, return_sequences=_return_sequences, name='class-GRU'+str(i))(l)
-        #l = Dense(1)(l)
-        distances = l
-        #distances = Lambda(lambda x: x * 50.)(l)
-        outputs = [distances]
-    else:
-        for i, hidden_neuron in enumerate(hidden_neurons):
-            _return_sequences = True
-            #_activation = 'tanh'
-            _activation = 'relu'
-            _kernel_initializer = 'he_normal'
-            _name = 'class-GRU' + str(i)
-            if i == (len(hidden_neurons) - 1):
-                _return_sequences = True
-                _activation = 'sigmoid'
-                _kernel_initializer = 'he_normal'
-                _name = 'class'
-            l = GRU(hidden_neuron, activation = _activation, return_sequences=_return_sequences, name=_name, kernel_initializer = _kernel_initializer)(l)
-        classification = l
+            _activation = 'sigmoid'
+            #_kernel_initializer = 'he_normal'
+            _name = 'class'
+        l = GRU(hidden_neuron,
+                activation = _activation,
+                return_sequences=_return_sequences,
+                name=_name,
+                kernel_initializer = _kernel_initializer,
+                implementation=2)(l)
+    classification = l
 
-        o = Concatenate(axis=-1)([l0, l1, classification])
-
-        for i, hidden_neuron in enumerate(hidden_neurons):
-            _return_sequences = True
-            _activation = 'relu'
-            _kernel_initializer = 'he_normal'
-            if i == (len(hidden_neurons) - 1):
-                _return_sequences = False
-                _activation = 'linear'
-                _kernel_initializer = 'he_normal'
-                hidden_neuron = 3
-            o = GRU(hidden_neuron, activation = _activation, return_sequences=_return_sequences, name='loc-GRU'+str(i), kernel_initializer = _kernel_initializer)(o)
-
-#        distance = Lambda(lambda x: x * 25., name='distance', output_shape=(1,))(o)
-        distance = Lambda(lambda x: x * (25., 25., 3.) + (25.,25.,-1.5), name='centroid', output_shape=(3,))(o)
-
-        outputs = [classification, distance]
+    outputs = [classification]
 
     model = Model(inputs=[lidar_distances, lidar_heights, lidar_intensities], outputs=outputs)
     return model
@@ -357,6 +379,7 @@ def gen(items, batch_size, points_per_ring, rings, pointnet_points, localizer_po
 
     if localizer_points_per_ring is not None:
         l_distance_seqs  = np.empty((batch_size, localizer_points_per_ring, len(rings)), dtype=np.float32)
+        l_height_seqs    = np.empty((batch_size, localizer_points_per_ring, len(rings)), dtype=np.float32)
         l_intensity_seqs = np.empty((batch_size, localizer_points_per_ring, len(rings)), dtype=np.float32)
 
         # localizer  label (output): distance to centroid
@@ -539,6 +562,7 @@ def gen(items, batch_size, points_per_ring, rings, pointnet_points, localizer_po
                             else:
                                 _yaw_span = _max_yaw - _min_yaw
                                 l_distance_seqs[ii, :, :]  = 0.
+                                l_height_seqs[ii, :, :]    = 0.
                                 l_intensity_seqs[ii, :, :] = 0.
 
                                 for ring in rings:
@@ -546,16 +570,17 @@ def gen(items, batch_size, points_per_ring, rings, pointnet_points, localizer_po
                                     mm = mn + _yaw_span
 
                                     l_distance_seqs [ii, mn:mm, ring - rings[0]] = distance_seqs [ii, _min_yaw:_max_yaw, ring - rings[0]]
+                                    l_height_seqs   [ii, mn:mm, ring - rings[0]] = height_seqs   [ii, _min_yaw:_max_yaw, ring - rings[0]]
                                     l_intensity_seqs[ii, mn:mm, ring - rings[0]] = intensity_seqs[ii, _min_yaw:_max_yaw, ring - rings[0]]
 
                                 l_centroid_seqs[ii] = np.linalg.norm(centroids[ii, :2])
 
                         if localizer_points_per_ring is None:
     #                        yield ([distance_seqs, intensity_seqs], [classification_seqs, distances]) #)
-                            yield ([distance_seqs, height_seqs, intensity_seqs], [classification_seqs, centroids]) #)
+                            yield ([distance_seqs, height_seqs, intensity_seqs], [classification_seqs]) #)
 
                         else:
-                            yield ([l_distance_seqs, l_intensity_seqs], l_centroid_seqs) #)
+                            yield ([l_distance_seqs, l_height_seqs, l_intensity_seqs], l_centroid_seqs) #)
 
                         i = 0
 
@@ -655,19 +680,13 @@ if args.localizer or args.pointnet:
 else:
     _class_loss = 'binary_crossentropy' if not args.freeze_class     else null_loss
     _loc_loss   = 'mse'                 if not args.freeze_localizer else null_loss
-    _loss = [_class_loss, _loc_loss]
-    _metrics = { 'class':'acc', 'distance':'mse'}
+    _loss = 'binary_crossentropy'#'[_class_loss, _loc_loss]
+    _metrics = { 'class':'acc'}
 
-if not args.localizer and not args.pointnet:
-    # set weights for the localizer part of the network according to args.joint
-    for i, hn in enumerate(args.hidden_neurons):
-        model.get_layer(name='loc-GRU'+str(i)).trainable = not args.freeze_localizer
-
-        _class_name = 'class-GRU'+str(i) if i != (len(args.hidden_neurons) -1) else 'class'
-        model.get_layer(name=_class_name).trainable = not args.freeze_class
 
 model.summary()
-model.compile(loss=_loss, optimizer=RMSprop(lr=LEARNING_RATE, ), metrics = _metrics, loss_weights = [ 1., args.weight_localizer] if not args.localizer and not args.pointnet else [1.])
+#model.compile(loss=_loss, optimizer=RMSprop(lr=LEARNING_RATE), metrics = _metrics, loss_weights = [ 1., args.weight_localizer] if not args.localizer and not args.pointnet else [1.])
+model.compile(loss=_loss, optimizer=RMSprop(lr=LEARNING_RATE), metrics = _metrics)
 
 if args.test:
     distance_seq = np.empty((points_per_ring, len(rings)), dtype=np.float32)
@@ -715,13 +734,8 @@ else:
         monitor = 'val_loss'
     else:
         postfix = "-cla-rings_"+str(rings[0])+'_'+str(rings[-1]+1)
-        metric  = ""
-        if not args.freeze_class:
-            metric  += "-val_class_acc{val_class_acc:.4f}"
-            monitor = 'val_class_acc'
-        if not args.freeze_localizer:
-            metric  += "-val_centroid_loss{val_centroid_loss:.4f}"
-            monitor = 'val_centroid_loss'
+        metric  = "-val_class_acc{val_acc:.4f}"
+        monitor = 'val_acc'
 
 
     save_checkpoint = ModelCheckpoint(
