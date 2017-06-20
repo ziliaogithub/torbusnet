@@ -43,8 +43,9 @@ sys.path.append(os.path.join(BASE_DIR, 'didi-competition/tracklets/python'))
 from diditracklet  import *
 import point_utils
 
-R2_DATA_DIR      = '../release2/Data-points-processed'
-R3_DATA_DIR      = '../release3/Data-points-processed'
+
+R2_DATA_DIR      = '../didi-data/release2/Data-points-processed'
+R3_DATA_DIR      = '../didi-data/release3/Data-points-processed'
 R2_TRAIN_FILE    = './train-release2.txt'
 R3_TRAIN_FILE    = './train-release3.txt'
 R2_VALIDATE_FILE = './validate-release2.txt'
