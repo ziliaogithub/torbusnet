@@ -283,14 +283,15 @@ def get_model_localizer(points_per_ring, rings, hidden_neurons):
 
 def get_model_recurrent(points_per_ring, rings, hidden_neurons, localizer=False):
     lidar_distances   = Input(shape=(points_per_ring, rings ))
-    lidar_heights     = Input(shape=(points_per_ring, rings ))
+    #lidar_heights     = Input(shape=(points_per_ring, rings ))
     lidar_intensities = Input(shape=(points_per_ring, rings ))
 
     l0  = Lambda(lambda x: x * 1/50.  - 0.5, output_shape=(points_per_ring, rings))(lidar_distances)
-    l1  = Lambda(lambda x: x * 1/3.   + 0.5, output_shape=(points_per_ring, rings))(lidar_heights)
+    #l1  = Lambda(lambda x: x * 1/3.   + 0.5, output_shape=(points_per_ring, rings))(lidar_heights)
     l2  = Lambda(lambda x: x * 1/128. - 0.5, output_shape=(points_per_ring, rings))(lidar_intensities)
 
-    o  = Concatenate(axis=-1, name='lidar')([l0, l1, l2])
+#    o  = Concatenate(axis=-1, name='lidar')([l0, l1, l2])
+    o  = Concatenate(axis=-1, name='lidar')([l0, l2])
 
     l  = o
 
@@ -315,7 +316,9 @@ def get_model_recurrent(points_per_ring, rings, hidden_neurons, localizer=False)
 
     outputs = [classification]
 
-    model = Model(inputs=[lidar_distances, lidar_heights, lidar_intensities], outputs=outputs)
+
+    #model = Model(inputs=[lidar_distances, lidar_heights, lidar_intensities], outputs=outputs)
+    model = Model(inputs=[lidar_distances, lidar_intensities], outputs=outputs)
     return model
 
 def save_lidar_plot(lidar_distance, box, filename, highlight=None):
@@ -578,7 +581,7 @@ def gen(items, batch_size, points_per_ring, rings, pointnet_points, localizer_po
 
                         if localizer_points_per_ring is None:
     #                        yield ([distance_seqs, intensity_seqs], [classification_seqs, distances]) #)
-                            yield ([distance_seqs, height_seqs, intensity_seqs], [classification_seqs]) #)
+                            yield ([distance_seqs, intensity_seqs], [classification_seqs]) #)
 
                         else:
                             yield ([l_distance_seqs, l_height_seqs, l_intensity_seqs], l_centroid_seqs) #)
@@ -692,11 +695,14 @@ model.compile(loss=_loss, optimizer=RMSprop(lr=LEARNING_RATE), metrics = _metric
 if args.test:
     distance_seq = np.empty((points_per_ring, len(rings)), dtype=np.float32)
     if args.validate_split is not None:
+
         _items = get_items(provider_didi.get_tracklets(DATA_DIR, args.train_file, xml_filename=XML_TRACKLET_FILENAME), unsafe=UNSAFE_TRAINING)
         _, validate_items = split_train(_items, test_size=args.validate_split * 0.01)
 
     predictions = model.predict_generator(
-        generator=gen(validate_items, BATCH_SIZE, points_per_ring, rings, args.pointnet_points, training = False),
+        #        gen(train_items, BATCH_SIZE, points_per_ring, rings, pointnet_points, localizer_points_per_ring),
+
+        generator=gen(validate_items, BATCH_SIZE, points_per_ring, rings, pointnet_points, localizer_points_per_ring, training = False),
         steps=len(validate_items) // BATCH_SIZE)
 
     i = 0

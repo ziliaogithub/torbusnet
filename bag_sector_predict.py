@@ -18,7 +18,7 @@ from generate_tracklet import *
 import re
 
 parser = argparse.ArgumentParser(description='Predicts sector where object is detected in bag.')
-parser.add_argument('-i', '--input-bag', default='../release2/Data-points/test/19_f2.bag', type=str, help='input bag to process')
+parser.add_argument('-i', '--input-bag', default='../didi-data/release2/Data-points/test/19_f2.bag', type=str, help='input bag to process')
 parser.add_argument('-o', '--output-dir', default='./img-out', help='output directory for images')
 parser.add_argument('-m', '--model', required = True, help='path to hdf5 model')
 parser.add_argument('-cd', '--clip-distance', default=50., type=float, help='Clip distance (needs to be consistent with trained model!)')
@@ -54,14 +54,14 @@ for topic, msg, t in rosbag.Bag(args.input_bag).read_messages():
 
         # TODO: change the net so that we can feed it the output of filter_lidar_rings directly w/o rearraging the arrays
         lidar_d = np.empty((1, points_per_ring, len(rings)), dtype=np.float32)
-        lidar_z = np.empty((1, points_per_ring, len(rings)), dtype=np.float32)
+        #lidar_z = np.empty((1, points_per_ring, len(rings)), dtype=np.float32)
         lidar_i = np.empty((1, points_per_ring, len(rings)), dtype=np.float32)
         for ring in range(len(rings)):
             lidar_d[0, :, ring] = lidar[ring, :, 0]
-            lidar_z[0, :, ring] = lidar[ring, :, 1]
+            #lidar_z[0, :, ring] = lidar[ring, :, 1]
             lidar_i[0, :, ring] = lidar[ring, :, 2]
         time_prep_end = time.time()
-        class_predictions_by_angle = model.predict([lidar_d, lidar_z, lidar_i], batch_size = 1)
+        class_predictions_by_angle = model.predict([lidar_d, lidar_i], batch_size = 1)
         time_infe_end = time.time()
         print 'Total time: %0.3f ms' % ((time_infe_end - time_prep_start) * 1000.0)
         print ' Generator: %0.3f ms' % ((time_prep_generator_end - time_prep_start) * 1000.0)
