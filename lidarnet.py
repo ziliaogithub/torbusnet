@@ -40,7 +40,7 @@ sys.path.append(BASE_DIR)
 
 sys.path.append(os.path.join(BASE_DIR, 'didi-competition/tracklets/python'))
 
-from diditracklet  import *
+from diditracklet import *
 import point_utils
 
 
@@ -308,6 +308,7 @@ def get_model_recurrent(points_per_ring, rings, hidden_neurons, localizer=False,
             _activation = 'sigmoid'
             #_kernel_initializer = 'he_normal'
             _name = 'class'
+            hidden_neuron = rings
         l = GRU(hidden_neuron,
                 activation = _activation,
                 return_sequences=_return_sequences,
@@ -378,7 +379,9 @@ def gen(items, batch_size, points_per_ring, rings, pointnet_points, sector_split
         height_seqs    = np.empty((batch_size * sector_splits, points_per_ring // sector_splits, len(rings)), dtype=np.float32)
         intensity_seqs = np.empty((batch_size * sector_splits, points_per_ring // sector_splits, len(rings)), dtype=np.float32)
         # classifier label (output): 0 if point does not belong to car, 1 otherwise
-        classification_seqs = np.empty((batch_size * sector_splits, points_per_ring // sector_splits, 1), dtype=np.float32)
+        classification_seqs      = np.empty((batch_size * sector_splits, points_per_ring // sector_splits, 1), dtype=np.float32)
+        ring_classification_seqs = np.empty((batch_size * sector_splits, points_per_ring // sector_splits, len(rings)), dtype=np.float32)
+
     else:
     # inputs classifier pointnet
         lidars         = np.empty((batch_size, pointnet_points, 4), dtype=np.float32)
@@ -494,12 +497,15 @@ def gen(items, batch_size, points_per_ring, rings, pointnet_points, sector_split
 
                     if skip is False:
                         if pointnet_points is None:
-                            lidar_d_i  = tracklet.get_lidar_rings(frame,
+                            lidar_d_i, lidar_int  = tracklet.get_lidar_rings(frame,
                                                                   rings = rings,
                                                                   points_per_ring = points_per_ring,
                                                                   clip=(0., 50.),
                                                                   rotate = random_yaw,
-                                                                  flipX = flipX, flipY = flipY) #
+                                                                  flipX = flipX, flipY = flipY,
+                                                                  return_lidar_interpolated = True)
+
+
                         else:
                             lidar = tracklet.get_lidar(frame, pointnet_points, angle_cone=(min_yaw, max_yaw), rings=rings)
                             if lidar.shape[0] == 0:
@@ -509,10 +515,11 @@ def gen(items, batch_size, points_per_ring, rings, pointnet_points, sector_split
             else:
                 # validation
                 if pointnet_points is None:
-                    lidar_d_i = tracklet.get_lidar_rings(frame,
+                    lidar_d_i, lidar_int = tracklet.get_lidar_rings(frame,
                                                          rings = rings,
                                                          points_per_ring = points_per_ring,
-                                                         clip = (0.,50.))
+                                                         clip = (0.,50.),
+                                                         return_lidar_interpolated=True)
                 else:
                     min_yaw, max_yaw = minmax_yaw(box)
                     lidar = tracklet.get_lidar(frame, pointnet_points, angle_cone=(min_yaw, max_yaw), rings=rings)
@@ -540,8 +547,16 @@ def gen(items, batch_size, points_per_ring, rings, pointnet_points, sector_split
                 if pointnet_points is None:
 
                     min_yaw, max_yaw = minmax_yaw(box)
+
                     _min_yaw = int(points_per_ring * (min_yaw + np.pi) / (2 * np.pi))
                     _max_yaw = int(points_per_ring * (max_yaw + np.pi) / (2 * np.pi))
+
+                    point_idx_in_box = DidiTracklet.get_lidar_in_box(lidar_int, box.T, return_idx_only=True)
+                    ring_classification = np.zeros((len(rings), points_per_ring ), dtype=np.float32)
+                    ring_classification[np.floor_divide(point_idx_in_box, points_per_ring), np.remainder(point_idx_in_box, points_per_ring)] = 1.
+
+                    #print(ring_classification[:,4])
+
                     #print("all", _min_yaw, _max_yaw)
 
                     s_start = 0
@@ -560,6 +575,8 @@ def gen(items, batch_size, points_per_ring, rings, pointnet_points, sector_split
                             distance_seqs [i * sector_splits + sector, :, ring - rings[0]] = lidar_d_i[ring - rings[0], s_start:s_end, 0]
                             height_seqs   [i * sector_splits + sector, :, ring - rings[0]] = lidar_d_i[ring - rings[0], s_start:s_end, 1]
                             intensity_seqs[i * sector_splits + sector, :, ring - rings[0]] = lidar_d_i[ring - rings[0], s_start:s_end, 2]
+
+                            ring_classification_seqs[i * sector_splits + sector, :, ring - rings[0]] = ring_classification[ring - rings[0], s_start:s_end]
 
                         s_start = s_end
 
@@ -602,7 +619,7 @@ def gen(items, batch_size, points_per_ring, rings, pointnet_points, sector_split
 
                         if localizer_points_per_ring is None:
     #                        yield ([distance_seqs, intensity_seqs], [classification_seqs, distances]) #)
-                            yield ([distance_seqs, intensity_seqs], [classification_seqs])
+                            yield ([distance_seqs, intensity_seqs], [ring_classification_seqs])
                         else:
                             yield ([l_distance_seqs, l_height_seqs, l_intensity_seqs], l_centroid_seqs) #)
 
