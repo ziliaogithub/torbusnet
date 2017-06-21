@@ -23,6 +23,7 @@ parser.add_argument('-o', '--output-dir', default='./img-out', help='output dire
 parser.add_argument('-m', '--model', required = True, help='path to hdf5 model')
 parser.add_argument('-cd', '--clip-distance', default=50., type=float, help='Clip distance (needs to be consistent with trained model!)')
 parser.add_argument('-c', '--cpu', action='store_true', help='force CPU inference')
+parser.add_argument('-p', '--print-predictions', action='store_true', help='Print predictions to stdout')
 
 args = parser.parse_args()
 
@@ -33,8 +34,10 @@ if args.cpu:
 model = load_model(args.model)
 model.summary()
 points_per_ring = model.get_input_shape_at(0)[0][1]
-match = re.search(r'lidarnet-cla-rings_(\d+)_(\d+)-.*\.hdf5', args.model)
-rings = range(int(match.group(1)), int(match.group(2)))
+match = re.search(r'lidarnet-cla-rings_(\d+)_(\d+)-sectors_(\d+)-.*\.hdf5', args.model)
+rings   = range(int(match.group(1)), int(match.group(2)))
+sectors = int(match.group(3))
+points_per_ring *= sectors
 assert len(rings) == model.get_input_shape_at(0)[0][2]
 
 POINT_LIMIT = 65536
@@ -53,15 +56,19 @@ for topic, msg, t in rosbag.Bag(args.input_bag).read_messages():
         lidar = DidiTracklet.filter_lidar_rings(cloud[:points], rings, points_per_ring, clip=(0., args.clip_distance))
 
         # TODO: change the net so that we can feed it the output of filter_lidar_rings directly w/o rearraging the arrays
-        lidar_d = np.empty((1, points_per_ring, len(rings)), dtype=np.float32)
+        lidar_d = np.empty((sectors, points_per_ring // sectors, len(rings)), dtype=np.float32)
         #lidar_z = np.empty((1, points_per_ring, len(rings)), dtype=np.float32)
-        lidar_i = np.empty((1, points_per_ring, len(rings)), dtype=np.float32)
-        for ring in range(len(rings)):
-            lidar_d[0, :, ring] = lidar[ring, :, 0]
-            #lidar_z[0, :, ring] = lidar[ring, :, 1]
-            lidar_i[0, :, ring] = lidar[ring, :, 2]
+        lidar_i = np.empty((sectors, points_per_ring // sectors, len(rings)), dtype=np.float32)
+        s_start = 0
+        for sector in range(sectors):
+            s_end = s_start + points_per_ring // sectors
+            for ring in range(len(rings)):
+                lidar_d[sector, :, ring] = lidar[ring, s_start:s_end, 0]
+                #lidar_z[0, :, ring] = lidar[ring, :, 1]
+                lidar_i[sector, :, ring] = lidar[ring, s_start:s_end, 2]
+            s_start = s_end
         time_prep_end = time.time()
-        class_predictions_by_angle = model.predict([lidar_d, lidar_i], batch_size = 1)
+        class_predictions_by_angle = model.predict([lidar_d, lidar_i], batch_size = sectors)
         time_infe_end = time.time()
         print 'Total time: %0.3f ms' % ((time_infe_end - time_prep_start) * 1000.0)
         print ' Generator: %0.3f ms' % ((time_prep_generator_end - time_prep_start) * 1000.0)
@@ -69,5 +76,6 @@ for topic, msg, t in rosbag.Bag(args.input_bag).read_messages():
         print ' Inference: %0.3f ms' % ((time_infe_end - time_prep_end)   * 1000.0)
 
         print(timestamp)
-        print(class_predictions_by_angle)
+        if args.print_predictions:
+            print(class_predictions_by_angle)
 

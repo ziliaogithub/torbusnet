@@ -78,6 +78,7 @@ parser.add_argument('-fl', '--freeze-localizer', action='store_true', help='Free
 parser.add_argument('-wl', '--weight-localizer', type=float, default=0.001, help='Weight factor for localizer component of loss')
 parser.add_argument('-pn', '--pointnet', action='store_true', help='Train pointnet-based localizer')
 parser.add_argument('-pp', '--pointnet-points', type=int, default=1024, help='Pointnet points for regressor')
+parser.add_argument('-ss', '--sector-splits', default=4, type=int, help='Sector splits (to make it faster)')
 
 
 args = parser.parse_args()
@@ -281,7 +282,8 @@ def get_model_localizer(points_per_ring, rings, hidden_neurons):
     return model
 
 
-def get_model_recurrent(points_per_ring, rings, hidden_neurons, localizer=False):
+def get_model_recurrent(points_per_ring, rings, hidden_neurons, localizer=False, sector_splits=1):
+    points_per_ring = points_per_ring // sector_splits
     lidar_distances   = Input(shape=(points_per_ring, rings ))
     #lidar_heights     = Input(shape=(points_per_ring, rings ))
     lidar_intensities = Input(shape=(points_per_ring, rings ))
@@ -363,7 +365,7 @@ def minmax_yaw(box):
     return min_yaw, max_yaw
 
 # if localizer_points_per_ring is a number => yield localizer semantics
-def gen(items, batch_size, points_per_ring, rings, pointnet_points, localizer_points_per_ring=None, training=True):
+def gen(items, batch_size, points_per_ring, rings, pointnet_points, sector_splits, localizer_points_per_ring=None, training=True):
 
     angles         = np.empty((batch_size, 1), dtype=np.float32)
     distances      = np.empty((batch_size, 1), dtype=np.float32)
@@ -372,11 +374,11 @@ def gen(items, batch_size, points_per_ring, rings, pointnet_points, localizer_po
 
     if pointnet_points is None:
         # inputs classifier RNN
-        distance_seqs  = np.empty((batch_size, points_per_ring, len(rings)), dtype=np.float32)
-        height_seqs    = np.empty((batch_size, points_per_ring, len(rings)), dtype=np.float32)
-        intensity_seqs = np.empty((batch_size, points_per_ring, len(rings)), dtype=np.float32)
+        distance_seqs  = np.empty((batch_size * sector_splits, points_per_ring // sector_splits, len(rings)), dtype=np.float32)
+        height_seqs    = np.empty((batch_size * sector_splits, points_per_ring // sector_splits, len(rings)), dtype=np.float32)
+        intensity_seqs = np.empty((batch_size * sector_splits, points_per_ring // sector_splits, len(rings)), dtype=np.float32)
         # classifier label (output): 0 if point does not belong to car, 1 otherwise
-        classification_seqs = np.empty((batch_size, points_per_ring, 1), dtype=np.float32)
+        classification_seqs = np.empty((batch_size * sector_splits, points_per_ring // sector_splits, 1), dtype=np.float32)
     else:
     # inputs classifier pointnet
         lidars         = np.empty((batch_size, pointnet_points, 4), dtype=np.float32)
@@ -537,10 +539,29 @@ def gen(items, batch_size, points_per_ring, rings, pointnet_points, localizer_po
 
                 if pointnet_points is None:
 
-                    for ring in rings:
-                        distance_seqs [i, :, ring - rings[0]] = lidar_d_i[ring - rings[0], :, 0]
-                        height_seqs   [i, :, ring - rings[0]] = lidar_d_i[ring - rings[0], :, 1]
-                        intensity_seqs[i, :, ring - rings[0]] = lidar_d_i[ring - rings[0], :, 2]
+                    min_yaw, max_yaw = minmax_yaw(box)
+                    _min_yaw = int(points_per_ring * (min_yaw + np.pi) / (2 * np.pi))
+                    _max_yaw = int(points_per_ring * (max_yaw + np.pi) / (2 * np.pi))
+                    #print("all", _min_yaw, _max_yaw)
+
+                    s_start = 0
+                    for sector in range(sector_splits):
+                        s_end = s_start + points_per_ring // sector_splits
+
+                        classification_seqs[i * sector_splits + sector, :] = 0
+                        if ((_min_yaw >= s_start) and (_min_yaw < s_end)) or \
+                            ((_max_yaw >= s_start) and (_max_yaw < s_end)):
+                            __min_yaw = max(s_start, _min_yaw)
+                            __max_yaw = min(s_end, _max_yaw)
+                            classification_seqs[i * sector_splits + sector, (__min_yaw - s_start):(__max_yaw - s_start)] = 1.
+                            #print(__min_yaw,__max_yaw)
+
+                        for ring in rings:
+                            distance_seqs [i * sector_splits + sector, :, ring - rings[0]] = lidar_d_i[ring - rings[0], s_start:s_end, 0]
+                            height_seqs   [i * sector_splits + sector, :, ring - rings[0]] = lidar_d_i[ring - rings[0], s_start:s_end, 1]
+                            intensity_seqs[i * sector_splits + sector, :, ring - rings[0]] = lidar_d_i[ring - rings[0], s_start:s_end, 2]
+
+                        s_start = s_end
 
                     if this_max_angle:
                         save_lidar_plot(distance_seqs[i], box, "train-max_angle.png")
@@ -581,8 +602,7 @@ def gen(items, batch_size, points_per_ring, rings, pointnet_points, localizer_po
 
                         if localizer_points_per_ring is None:
     #                        yield ([distance_seqs, intensity_seqs], [classification_seqs, distances]) #)
-                            yield ([distance_seqs, intensity_seqs], [classification_seqs]) #)
-
+                            yield ([distance_seqs, intensity_seqs], [classification_seqs])
                         else:
                             yield ([l_distance_seqs, l_height_seqs, l_intensity_seqs], l_centroid_seqs) #)
 
@@ -639,10 +659,10 @@ if args.model:
     keras.losses.null_loss = null_loss
 
     model = load_model(args.model)
-    points_per_ring = model.get_input_shape_at(0)[0][1]
+    points_per_ring = model.get_input_shape_at(0)[0][1] * args.sector_splits
     nrings = model.get_input_shape_at(0)[0][2]
     print('Loaded model with ' + str(points_per_ring) + ' points per ring and ' + str(nrings) + ' rings')
-    assert points_per_ring == args.points_per_ring
+    #assert points_per_ring == args.points_per_ring
     assert nrings == len(rings)
     localizer_points_per_ring = int(np.ceil(points_per_ring * args.worst_case_angle / (2 * np.pi ))) if args.localizer else None
 
@@ -656,7 +676,12 @@ else:
         if args.localizer:
             model = get_model_localizer(localizer_points_per_ring, len(rings), hidden_neurons=args.hidden_neurons)
         else:
-            model = get_model_recurrent(localizer_points_per_ring if args.localizer else points_per_ring, len(rings), hidden_neurons=args.hidden_neurons, localizer=args.localizer)
+            model = get_model_recurrent(
+                localizer_points_per_ring if args.localizer else points_per_ring,
+                len(rings),
+                hidden_neurons=args.hidden_neurons,
+                localizer=args.localizer,
+                sector_splits = args.sector_splits)
 
 if (args.gpus > 1) or (len(args.batch_size) > 1):
     if len(args.batch_size) == 1:
@@ -699,12 +724,16 @@ if args.test:
         _items = get_items(provider_didi.get_tracklets(DATA_DIR, args.train_file, xml_filename=XML_TRACKLET_FILENAME), unsafe=UNSAFE_TRAINING)
         _, validate_items = split_train(_items, test_size=args.validate_split * 0.01)
 
-    predictions = model.predict_generator(
+    _predictions = model.predict_generator(
         #        gen(train_items, BATCH_SIZE, points_per_ring, rings, pointnet_points, localizer_points_per_ring),
 
-        generator=gen(validate_items, BATCH_SIZE, points_per_ring, rings, pointnet_points, localizer_points_per_ring, training = False),
-        steps=len(validate_items) // BATCH_SIZE)
+        generator=gen(validate_items, BATCH_SIZE, points_per_ring, rings, pointnet_points, args.sector_splits, localizer_points_per_ring, training = False),
+        steps=args.sector_splits * len(validate_items) // BATCH_SIZE)
 
+    print(_predictions.shape)
+
+    predictions =  _predictions.reshape((-1, points_per_ring, 1))
+    print(predictions.shape)
     i = 0
     for item,prediction in zip(validate_items,predictions):
         tracklet, frame = item
@@ -740,7 +769,7 @@ else:
         metric  = "-val_loss{val_loss:.4f}"
         monitor = 'val_loss'
     else:
-        postfix = "-cla-rings_"+str(rings[0])+'_'+str(rings[-1]+1)
+        postfix = "-cla-rings_"+str(rings[0])+'_'+str(rings[-1]+1)+'-sectors_'+str(args.sector_splits)
         metric  = "-val_class_acc{val_acc:.4f}"
         monitor = 'val_acc'
 
@@ -751,11 +780,11 @@ else:
         verbose=0,  save_best_only=True, save_weights_only=False, mode='auto', period=1)
 
     reduce_lr = ReduceLROnPlateau(monitor=monitor, factor=0.5, patience=10, min_lr=1e-7, epsilon = 0.0001, verbose=1)
-
+    print(len(validate_items) // BATCH_SIZE)
     model.fit_generator(
-        gen(train_items, BATCH_SIZE, points_per_ring, rings, pointnet_points, localizer_points_per_ring),
+        generator        = gen(train_items, BATCH_SIZE, points_per_ring, rings, pointnet_points, args.sector_splits, localizer_points_per_ring),
         steps_per_epoch  = len(train_items) // BATCH_SIZE,
-        validation_data  = gen(validate_items, BATCH_SIZE, points_per_ring, rings, pointnet_points, localizer_points_per_ring, training = False),
+        validation_data  = gen(validate_items, BATCH_SIZE, points_per_ring, rings, pointnet_points, args.sector_splits, localizer_points_per_ring, training = False),
         validation_steps = len(validate_items) // BATCH_SIZE,
         epochs = args.max_epoch,
         callbacks = [save_checkpoint, reduce_lr])
