@@ -324,32 +324,55 @@ def get_model_recurrent(points_per_ring, rings, hidden_neurons, localizer=False,
     model = Model(inputs=[lidar_distances, lidar_intensities], outputs=outputs)
     return model
 
-def save_lidar_plot(lidar_distance, box, filename, highlight=None):
+def save_lidar_plot(lidar_distance, box, filename, highlight=None, lidar_distance_gt=None, lidar_distance_pred=None):
     points_per_ring = lidar_distance.shape[0]
     nrings          = lidar_distance.shape[1]
 
-    centroid = np.average(box, axis=0)
+    fig, subplots = plt.subplots(nrows=1, ncols=1 if lidar_distance_pred is None else 2, sharex=True, squeeze=False)
 
     if highlight is not None:
         assert highlight.shape[0] == points_per_ring
         for _yaw, classification in np.ndenumerate(highlight):
             if classification >= 0.5:
-                plt.axvline(x=_yaw[0], alpha=0.8, color='0.8')
+                subplots[0].axvline(x=_yaw[0], alpha=0.8, color='0.8')
 
+    black  = np.array([0.,0.,0.,0.8]) * np.ones((points_per_ring,4))
+    angles = np.linspace(0, (points_per_ring - 1), num=points_per_ring)
+    point_size = 0.5
     for iring in range(nrings):
-        plt.plot(lidar_distance[:, iring])
+        if lidar_distance_gt is None:
+            subplots[0,0].plot(lidar_distance[:, iring])
+        else:
+            ring_lidar_distance_gt = lidar_distance_gt[iring]
+            #alpha = np.clip(np.expand_dims(ring_lidar_distance_gt, axis=-1) + 0.2, 0., 1.)
+            colors = np.array(black)
+            colors[:, 0] +=  ring_lidar_distance_gt
+            #colors = np.concatenate((black, alpha), axis=-1)
+            subplots[0,0].scatter(angles, lidar_distance[:, iring], s=point_size, color=colors)
+            if lidar_distance_pred is not None:
+                ring_lidar_distance_pred = lidar_distance_pred[:,iring]
+                colors = np.array(black)
+                colors[ring_lidar_distance_gt >= 0.5, 0] = 1.
+                colors[:, 3] =  ring_lidar_distance_gt
+                #alpha = np.clip(np.expand_dims(ring_lidar_distance_pred, axis=-1) + 0.2, 0., 1.)
+                #colors = black + (1) alpha # np.concatenate((black, alpha), axis=-1)
+                subplots[0, 1].scatter(angles, lidar_distance[:, iring], s=point_size, color=colors)
 
-    yaw = np.arctan2(centroid[1], centroid[0])
-    _yaw = int(points_per_ring * (yaw + np.pi) / (2 * np.pi))
-    plt.axvline(x=_yaw, color='k', linestyle='--')
+    if box is not None:
+        centroid = np.average(box, axis=0)
 
-    for b in box[:4]:
-        yaw = np.arctan2(b[1], b[0])
+        yaw = np.arctan2(centroid[1], centroid[0])
         _yaw = int(points_per_ring * (yaw + np.pi) / (2 * np.pi))
-        plt.axvline(x=_yaw, color='blue', linestyle=':', alpha=0.5)
+        subplots[0,0].axvline(x=_yaw, color='k', linestyle='--')
 
-    plt.savefig(filename)
-    plt.clf()
+        for b in box[:4]:
+            yaw = np.arctan2(b[1], b[0])
+            _yaw = int(points_per_ring * (yaw + np.pi) / (2 * np.pi))
+            subplots[0,0].axvline(x=_yaw, color='blue', linestyle=':', alpha=0.5)
+
+    fig.savefig(filename)
+    fig.clf()
+    plt.close(fig)
     return
 
 def minmax_yaw(box):
@@ -745,25 +768,33 @@ if args.test:
         #        gen(train_items, BATCH_SIZE, points_per_ring, rings, pointnet_points, localizer_points_per_ring),
 
         generator=gen(validate_items, BATCH_SIZE, points_per_ring, rings, pointnet_points, args.sector_splits, localizer_points_per_ring, training = False),
-        steps=args.sector_splits * len(validate_items) // BATCH_SIZE)
+        steps= len(validate_items) // BATCH_SIZE)
 
     print(_predictions.shape)
 
-    predictions =  _predictions.reshape((-1, points_per_ring, 1))
+    predictions =  _predictions.reshape((-1, points_per_ring, len(rings)))
     print(predictions.shape)
     i = 0
     for item,prediction in zip(validate_items,predictions):
         tracklet, frame = item
-        lidar_d_i = tracklet.get_lidar_rings(frame,
+        lidar_d_i, lidar_int = tracklet.get_lidar_rings(frame,
                                              rings=rings,
                                              points_per_ring=points_per_ring,
-                                             clip=(0., 50.))
+                                             clip=(0., 50.),
+                                             return_lidar_interpolated=True)
         box = tracklet.get_box(frame).T
 
         for ring in rings:
             distance_seq[:, ring - rings[0]] = lidar_d_i[ring - rings[0], :, 0]
 
-        save_lidar_plot(distance_seq, box, os.path.join('test', str(i) + '.png'), highlight = prediction)
+        point_idx_in_box = DidiTracklet.get_lidar_in_box(lidar_int, box.T, return_idx_only=True)
+        ring_classification_seq = np.zeros((len(rings), points_per_ring), dtype=np.float32)
+        ring_classification_seq[np.floor_divide(point_idx_in_box, points_per_ring), np.remainder(point_idx_in_box, points_per_ring)] = 1.
+
+        save_lidar_plot(distance_seq, box, os.path.join('test', str(i) + '.png'),
+                        highlight = None,
+                        lidar_distance_gt=ring_classification_seq,
+                        lidar_distance_pred=prediction)
         i += 1
 
 else:
@@ -786,7 +817,7 @@ else:
         metric  = "-val_loss{val_loss:.4f}"
         monitor = 'val_loss'
     else:
-        postfix = "-cla-rings_"+str(rings[0])+'_'+str(rings[-1]+1)+'-sectors_'+str(args.sector_splits)
+        postfix = "-seg-rings_"+str(rings[0])+'_'+str(rings[-1]+1)+'-sectors_'+str(args.sector_splits)
         metric  = "-val_class_acc{val_acc:.4f}"
         monitor = 'val_acc'
 

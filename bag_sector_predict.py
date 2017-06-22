@@ -34,7 +34,7 @@ if args.cpu:
 model = load_model(args.model)
 model.summary()
 points_per_ring = model.get_input_shape_at(0)[0][1]
-match = re.search(r'lidarnet-cla-rings_(\d+)_(\d+)-sectors_(\d+)-.*\.hdf5', args.model)
+match = re.search(r'lidarnet-seg-rings_(\d+)_(\d+)-sectors_(\d+)-.*\.hdf5', args.model)
 rings   = range(int(match.group(1)), int(match.group(2)))
 sectors = int(match.group(3))
 points_per_ring *= sectors
