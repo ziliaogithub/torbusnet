@@ -131,19 +131,43 @@ def smoothL1(y_true, y_pred):
 def null_loss(y_true, y_pred):
     return K.zeros_like(y_pred)
 
-def angle_loss(y_true, y_pred):
-    vector_diff_square = K.square(K.cos(y_true) - K.cos(y_pred)) + K.square(K.sin(y_true) - K.sin(y_pred))
+def min_angle_diff(y_true, y_pred):
+    if K._BACKEND == 'theano':
+        import theano
+        arctan2 = theano.tensor.arctan2
+    elif K._BACKEND == 'tensorflow': # NOT TESTED
+        import tensorflow as tf
+        arctan2 = tf.atan2
+
+    # https: // stackoverflow.com / questions / 1878907 / the - smallest - difference - between - 2 - angles
+    vector_diff_square = K.abs(arctan2(K.sin(y_true-y_pred), K.cos(y_true-y_pred)))
     return K.mean(vector_diff_square, axis=-1)
 
-    #diff = y_pred - y_true
-    #pis  = np.pi * K.ones_like(y_true)
-    #return K.mean(K.square(K.switch(K.greater(diff, pis), diff - pis, diff)), axis=-1)
+def min_angle_error_degrees(y_true, y_pred):
+    return min_angle_diff(y_true, y_pred) * 180. / np.pi
+
+def angle_loss(y_true, y_pred):
+    if K._BACKEND == 'theano':
+        import theano
+        arctan2 = theano.tensor.arctan2
+    elif K._BACKEND == 'tensorflow': # NOT WORDKING!
+        import tensorflow as tf
+        arctan2 = tf.atan2
+
+    # https: // stackoverflow.com / questions / 1878907 / the - smallest - difference - between - 2 - angles
+    #vector_diff_square = K.square(arctan2(K.sin(y_true-y_pred), K.cos(y_true-y_pred)))
+
+    vector_diff_square = K.square(K.cos(y_true) - K.cos(y_pred)) + K.square(K.sin(y_true) - K.sin(y_pred))
+    return K.mean(vector_diff_square, axis=-1)
 
 def get_model_pointnet(REGRESSION_POINTS):
 
     CHANNELS = 4
 
-    points = Input(shape=(REGRESSION_POINTS, CHANNELS))
+    points   = Input(shape=(REGRESSION_POINTS, CHANNELS))
+    distance = Input(shape=(1,))
+    yaw_corr = Input(shape=(1,))
+
     act = 'relu'
     ini = 'glorot_uniform'
     #p = Lambda(lambda x: x * (1. / 25., 1. / 25., 1. / 3., 1. / 64.) - (0.5, 0., -0.5, 1.))(points)
@@ -157,22 +181,28 @@ def get_model_pointnet(REGRESSION_POINTS):
 
     p = Flatten()(p)
     p = Dense(512, activation=act)(p)
-    pp = p
+    pyaw = psize = p
     p = Dense(256, activation=act)(p)
     centroids  = Dense(3, name='centroid')(p)
     #yaws        = Dense(3, name='corner0')(p)
 
     #corner0s   = Dense(3, name='corner0')(p)
     #corner2s   = Dense(3, name='corner2')(p)
+    psize = Dense(64, activation=act)(psize)
 
-    #box_sizes = Dense(3,  activation='relu', name='box_size')(p)
+    box_sizes = Dense(3, name='box_size')(psize)
 
     #pp = Dense(256, activation=act)(Concatenate()([centroids, box_sizes, pp]))
-    yaws      = Dense(1,  activation='tanh')(pp)
-    yaws      = Lambda(lambda x: x * np.pi , name='yaw')(yaws)
+    pyaw = Concatenate()([pyaw, distance, yaw_corr])
+    pyaw = Dense(256, activation=act)(pyaw)
+    pyaw = Dense(128, activation=act)(pyaw)
+    pyaw = Dense(64,  activation=act)(pyaw)
+    pyaw = Dense(32,  activation=act)(pyaw)
+    yaws = Dense(1,   activation='tanh')(pyaw)
+    yaws = Lambda(lambda x: x * np.pi / 2., name='yaw')(yaws)
 
     #model = Model(inputs=points, outputs=[centroids, corner0s, corner2s])
-    model = Model(inputs=points, outputs=[centroids, yaws])
+    model = Model(inputs=[points, distance, yaw_corr], outputs=[centroids, box_sizes, yaws])
 
     return model
 
@@ -295,8 +325,14 @@ def gen(items, batch_size, points_per_ring, rings, pointnet_points, sector_split
         classification_seqs      = np.empty((batch_size * sector_splits, points_per_ring // sector_splits, 1), dtype=np.float32)
 
     else:
-    # inputs classifier pointnet
+        # inputs classifier pointnet
         lidars         = np.empty((batch_size, pointnet_points, 4), dtype=np.float32)
+        distances      = np.empty((batch_size, 1), dtype=np.float32)
+        yaw_corrs      = np.empty((batch_size, 1), dtype=np.float32)
+
+        # outputs
+        box_sizes      = np.empty((batch_size, 3), dtype=np.float32)
+
         corner0s       = np.empty((batch_size, 3), dtype=np.float32)
         corner2s       = np.empty((batch_size, 3), dtype=np.float32)
 
@@ -439,15 +475,16 @@ def gen(items, batch_size, points_per_ring, rings, pointnet_points, sector_split
 
                     points_in_box = DidiTracklet.resample_lidar(points_in_box, pointnet_points)
 
-
                     yaw_correction = 0.
                     if True:
                         points_in_box_mean = np.mean(points_in_box[:, :3], axis=0)
                         angle = np.arctan2(points_in_box_mean[1], points_in_box_mean[0])
+                        #angle = np.arctan2(centroid[1], centroid[0])
+
                         centroid = point_utils.rotZ(centroid, angle)
                         box = point_utils.rotZ(box, angle)
                         points_in_box = point_utils.rotZ(points_in_box, angle)
-                        yaw_correction = angle
+                        yaw_correction = -angle
 
                     points_in_box_mean = np.mean(points_in_box[:, :3], axis=0)
                     #print(points_in_box_mean)
@@ -456,19 +493,29 @@ def gen(items, batch_size, points_per_ring, rings, pointnet_points, sector_split
                     lidars[i] = points_in_box[:,:4]
                     lidars[i,:,3] /= 128.
 
+                    distances[i] = np.linalg.norm(points_in_box_mean[:2])
+                    yaw_corrs[i] = 0
+
                     corner0s[i]  = box[2] - points_in_box_mean
                     corner2s[i]  = box[3] - points_in_box_mean
 
-                    yaw = tracklet.get_yaw(frame) + yaw_correction
-                    if True:
-                        # IMPORTANT -> ignoring orientation so that we get ordered coordinates w/o orientation
+                    box_sizes[i] = tracklet.get_box_size()
+
+                    def remove_orientation(yaw):
                         yaw = np.fmod(yaw, np.pi)
                         if yaw >= np.pi / 2.:
                             yaw -= np.pi
                         elif yaw <= -np.pi / 2.:
                             yaw += np.pi
                         assert (yaw <= (np.pi / 2.)) and (yaw >= (-np.pi / 2.))
-                    yaws[i] = yaw
+                        return yaw
+
+                    yaw = remove_orientation(tracklet.get_yaw(frame))
+                    #if True:
+                    #    yaw = remove_orientation(yaw)
+                    yaws[i] =  remove_orientation(yaw + yaw_correction)
+
+#                    yaws[i] =  np.fmod(yaw + yaw_correction, np.pi / 2.)
 
                 centroids[i] = centroid
 
@@ -519,7 +566,7 @@ def gen(items, batch_size, points_per_ring, rings, pointnet_points, sector_split
                     if pointnet_points is None:
                         yield ([distance_seqs, intensity_seqs], [ring_classification_seqs])
                     else:
-                        yield ([lidars], [centroids, yaws])
+                        yield ([lidars, distances, yaw_corrs], [centroids, box_sizes, yaws])
 
                     i = 0
 
@@ -610,8 +657,8 @@ if args.validate_split is None:
             unsafe=UNSAFE_TRAINING)
 
 if args.pointnet:
-    _loss = ['mse', angle_loss]
-    _metrics = ['mae'] #['mse', 'mse', 'mae']
+    _loss = ['mse', 'mse', angle_loss]
+    _metrics = { 'centroid':'mae', 'box_size' : 'mae', 'yaw' : min_angle_error_degrees } #['mse', 'mse', 'mae']
 else:
     _class_loss = 'binary_crossentropy'
     _loss = 'binary_crossentropy'
