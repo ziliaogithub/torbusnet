@@ -1,31 +1,16 @@
 import provider_didi
 import argparse
-from keras.initializers import Constant, Zeros
-from keras.regularizers import l2, l1
-from keras.layers.normalization import BatchNormalization
-from keras.models import Sequential, Model, Input
-from keras.layers import Input, merge, Layer, Concatenate, Multiply, LSTM, Bidirectional, GRU, Add
-from keras.layers.merge import dot, Dot, add
-from keras.layers.core import Dense, Activation, Flatten, Lambda, Dropout, Reshape
-from keras.layers.convolutional import Conv2D, Cropping2D, AveragePooling2D, Conv1D
-from keras.layers.pooling import GlobalMaxPooling2D
-from keras.activations import relu
-from keras.optimizers import Adam, Nadam, Adadelta, SGD
+from keras.models import Model
+from keras.layers import Input, Concatenate, GRU
+from keras.layers.core import Dense, Flatten, Lambda, Dropout, Reshape
+from keras.layers.convolutional import Conv2D
 from keras.layers.pooling import MaxPooling2D
-from keras.layers.advanced_activations import PReLU, LeakyReLU, ELU
-from keras.optimizers import Adam, Nadam, SGD, RMSprop
-from keras.layers.pooling import MaxPooling2D, MaxPooling3D, MaxPooling1D, GlobalMaxPooling1D, AveragePooling1D
-from keras.layers.local import LocallyConnected1D
 from keras.callbacks import ModelCheckpoint, ReduceLROnPlateau
 from keras.models import load_model
-from keras.initializers import TruncatedNormal
-from torbus_layers import TorbusMaxPooling2D
-import tensorflow as tf
+from keras.optimizers import Adam, RMSprop
 from sklearn.model_selection import train_test_split
-from selu import *
 import copy
-
-import multi_gpu
+from keras import backend as K
 
 import matplotlib as mpl
 mpl.use('Agg')
@@ -42,7 +27,6 @@ sys.path.append(os.path.join(BASE_DIR, 'didi-competition/tracklets/python'))
 
 from diditracklet import *
 import point_utils
-
 
 R2_DATA_DIR      = '../didi-data/release2/Data-points-processed'
 R3_DATA_DIR      = '../didi-data/release3/Data-points-processed'
@@ -119,18 +103,6 @@ else:
 '''
 assert args.gpus  == len(args.batch_size)
 
-HUBER_DELTA = 0.5
-
-def smoothL1(y_true, y_pred):
-    x = K.abs(y_true - y_pred)
-    if K._BACKEND == 'tensorflow':
-        import tensorflow as tf
-        x = tf.where(x < HUBER_DELTA, 0.5 * x ** 2, HUBER_DELTA * (x - 0.5 * HUBER_DELTA))
-        return  K.sum(x)
-
-def null_loss(y_true, y_pred):
-    return K.zeros_like(y_pred)
-
 def min_angle_diff(y_true, y_pred):
     if K._BACKEND == 'theano':
         import theano
@@ -155,7 +127,7 @@ def angle_loss(y_true, y_pred):
         arctan2 = tf.atan2
 
     # https: // stackoverflow.com / questions / 1878907 / the - smallest - difference - between - 2 - angles
-    #vector_diff_square = K.square(arctan2(K.sin(y_true-y_pred), K.cos(y_true-y_pred)))
+    # vector_diff_square = K.square(arctan2(K.sin(y_true-y_pred), K.cos(y_true-y_pred)))
 
     vector_diff_square = K.square(K.cos(y_true) - K.cos(y_pred)) + K.square(K.sin(y_true) - K.sin(y_pred))
     return K.mean(vector_diff_square, axis=-1)
@@ -196,7 +168,7 @@ def get_model_pointnet(REGRESSION_POINTS):
     pyaw = Dropout(0.1)(pyaw)
     pyaw = Dense(32,  activation=act)(pyaw)
     yaws = Dense(1,   activation='tanh')(pyaw)
-    yaws = Lambda(lambda x: x * np.pi / 2., name='yaw')(yaws)
+    yaws = Lambda(lambda x: x * np.pi / 2., name='yaw', output_shape=(1,))(yaws)
 
     model = Model(inputs=[points, distance], outputs=[centroids, box_sizes, yaws])
 
@@ -205,15 +177,15 @@ def get_model_pointnet(REGRESSION_POINTS):
 def get_model_recurrent(points_per_ring, rings, hidden_neurons, sector_splits=1):
     points_per_ring = points_per_ring // sector_splits
     lidar_distances   = Input(shape=(points_per_ring, rings ))
-    #lidar_heights     = Input(shape=(points_per_ring, rings ))
+    lidar_heights     = Input(shape=(points_per_ring, rings ))
     lidar_intensities = Input(shape=(points_per_ring, rings ))
 
     l0  = Lambda(lambda x: x * 1/50.  - 0.5, output_shape=(points_per_ring, rings))(lidar_distances)
-    #l1  = Lambda(lambda x: x * 1/3.   + 0.5, output_shape=(points_per_ring, rings))(lidar_heights)
+    l1  = Lambda(lambda x: x * 1/3.   + 0.5, output_shape=(points_per_ring, rings))(lidar_heights)
     l2  = Lambda(lambda x: x * 1/128. - 0.5, output_shape=(points_per_ring, rings))(lidar_intensities)
 
-#    o  = Concatenate(axis=-1, name='lidar')([l0, l1, l2])
-    o  = Concatenate(axis=-1, name='lidar')([l0, l2])
+    o  = Concatenate(axis=-1, name='lidar')([l0, l1, l2])
+#    o  = Concatenate(axis=-1, name='lidar')([l0, l2])
 
     l  = o
 
@@ -223,16 +195,19 @@ def get_model_recurrent(points_per_ring, rings, hidden_neurons, sector_splits=1)
         #_activation = 'relu'
         _kernel_initializer = 'he_normal'
         _name = 'class-GRU' + str(i)
+        _dropout = 0.1
         if i == (len(hidden_neurons) - 1):
             _return_sequences = True
             _activation = 'sigmoid'
             #_kernel_initializer = 'he_normal'
             _name = 'class'
             hidden_neuron = rings
+            _dropout = 0.2
         l = GRU(hidden_neuron,
                 activation = _activation,
                 return_sequences=_return_sequences,
                 name=_name,
+                dropout = _dropout,
                 kernel_initializer = _kernel_initializer,
                 implementation=2)(l)
     classification = l
@@ -240,8 +215,8 @@ def get_model_recurrent(points_per_ring, rings, hidden_neurons, sector_splits=1)
     outputs = [classification]
 
 
-    #model = Model(inputs=[lidar_distances, lidar_heights, lidar_intensities], outputs=outputs)
-    model = Model(inputs=[lidar_distances, lidar_intensities], outputs=outputs)
+    model = Model(inputs=[lidar_distances, lidar_heights, lidar_intensities], outputs=outputs)
+    #model = Model(inputs=[lidar_distances, lidar_intensities], outputs=outputs)
     return model
 
 def save_lidar_plot(lidar_distance, box, filename, highlight=None, lidar_distance_gt=None, lidar_distance_pred=None):
@@ -423,7 +398,7 @@ def gen(items, batch_size, points_per_ring, rings, pointnet_points, sector_split
                     this_max_angle = False
 
                     # car is between two frames, ignore it for now
-                    if angle_span >= np.pi:
+                    if False: #angle_span >= np.pi:
                         skip = True
                     elif angle_span > max_angle_span:
                         max_angle_span = angle_span
@@ -486,19 +461,10 @@ def gen(items, batch_size, points_per_ring, rings, pointnet_points, sector_split
                     distances[i] = np.linalg.norm(points_in_box_mean[:2])
                     box_sizes[i] = tracklet.get_box_size()
 
-                    def remove_orientation(yaw):
-                        yaw = np.fmod(yaw, np.pi)
-                        if yaw >= np.pi / 2.:
-                            yaw -= np.pi
-                        elif yaw <= -np.pi / 2.:
-                            yaw += np.pi
-                        assert (yaw <= (np.pi / 2.)) and (yaw >= (-np.pi / 2.))
-                        return yaw
-
-                    yaw = remove_orientation(tracklet.get_yaw(frame))
+                    yaw = point_utils.remove_orientation(tracklet.get_yaw(frame))
                     #if True:
                     #    yaw = remove_orientation(yaw)
-                    yaws[i] =  remove_orientation(yaw + yaw_correction)
+                    yaws[i] =  point_utils.remove_orientation(yaw + yaw_correction)
 
 #                    yaws[i] =  np.fmod(yaw + yaw_correction, np.pi / 2.)
 
@@ -549,7 +515,7 @@ def gen(items, batch_size, points_per_ring, rings, pointnet_points, sector_split
                 if i == batch_size:
 
                     if pointnet_points is None:
-                        yield ([distance_seqs, intensity_seqs], [ring_classification_seqs])
+                        yield ([distance_seqs, height_seqs, intensity_seqs], [ring_classification_seqs])
                     else:
                         yield ([lidars, distances], [centroids, box_sizes, yaws])
 
@@ -590,18 +556,25 @@ def split_train(train_items, test_size):
 if args.model:
     print("Loading model " + args.model)
 
-    # monkey-patch null_loss so model loads ok
+    # monkey-patch loss so model loads ok
     # https://github.com/fchollet/keras/issues/5916#issuecomment-290344248
     import keras.losses
-    keras.losses.null_loss = null_loss
+    import keras.metrics
     keras.losses.angle_loss = angle_loss
+    keras.metrics.min_angle_error_degrees = min_angle_error_degrees
 
     model = load_model(args.model)
-    points_per_ring = model.get_input_shape_at(0)[0][1] * args.sector_splits
-    nrings = model.get_input_shape_at(0)[0][2]
-    print('Loaded model with ' + str(points_per_ring) + ' points per ring and ' + str(nrings) + ' rings')
-    #assert points_per_ring == args.points_per_ring
-    assert nrings == len(rings)
+    if args.pointnet:
+        pointnet_points = model.get_input_shape_at(0)[0][1]
+        points_per_ring = args.points_per_ring
+        print('Loaded localizer model with ' + str(pointnet_points) + ' points')
+
+    else:
+        points_per_ring = model.get_input_shape_at(0)[0][1] * args.sector_splits
+        nrings = model.get_input_shape_at(0)[0][2]
+        print('Loaded segmenter model with ' + str(points_per_ring) + ' points per ring and ' + str(nrings) + ' rings')
+        #assert points_per_ring == args.points_per_ring
+        assert nrings == len(rings)
 
 else:
     points_per_ring = args.points_per_ring
@@ -616,6 +589,9 @@ else:
             sector_splits = args.sector_splits)
 
 if (args.gpus > 1) or (len(args.batch_size) > 1):
+    assert K._backend == 'tensorflow'
+    import multi_gpu
+
     if len(args.batch_size) == 1:
         model = multi_gpu.make_parallel(model, args.gpus )
         BATCH_SIZE = args.gpus * args.batch_size[0]
@@ -645,7 +621,6 @@ if args.pointnet:
     _loss = ['mse', 'mse', angle_loss]
     _metrics = { 'centroid':'mae', 'box_size' : 'mae', 'yaw' : min_angle_error_degrees } #['mse', 'mse', 'mae']
 else:
-    _class_loss = 'binary_crossentropy'
     _loss = 'binary_crossentropy'
     _metrics = { 'class':'acc'}
 
