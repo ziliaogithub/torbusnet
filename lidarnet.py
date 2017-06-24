@@ -166,11 +166,9 @@ def get_model_pointnet(REGRESSION_POINTS):
 
     points   = Input(shape=(REGRESSION_POINTS, CHANNELS))
     distance = Input(shape=(1,))
-    yaw_corr = Input(shape=(1,))
 
     act = 'relu'
     ini = 'glorot_uniform'
-    #p = Lambda(lambda x: x * (1. / 25., 1. / 25., 1. / 3., 1. / 64.) - (0.5, 0., -0.5, 1.))(points)
     p = Reshape(target_shape=(REGRESSION_POINTS, CHANNELS, 1), input_shape=(REGRESSION_POINTS, CHANNELS))(points)
     p = Conv2D(filters=64,   kernel_size=(1, CHANNELS), activation=act, kernel_initializer=ini)(p)
     p = Conv2D(filters=128,  kernel_size=(1, 1), activation=act, kernel_initializer=ini)(p)
@@ -181,28 +179,26 @@ def get_model_pointnet(REGRESSION_POINTS):
 
     p = Flatten()(p)
     p = Dense(512, activation=act)(p)
+    p = Dropout(0.1)(p)
     pyaw = psize = p
     p = Dense(256, activation=act)(p)
+    p = Dropout(0.2)(p)
     centroids  = Dense(3, name='centroid')(p)
-    #yaws        = Dense(3, name='corner0')(p)
 
-    #corner0s   = Dense(3, name='corner0')(p)
-    #corner2s   = Dense(3, name='corner2')(p)
     psize = Dense(64, activation=act)(psize)
-
+    psize = Dropout(0.2)(psize)
     box_sizes = Dense(3, name='box_size')(psize)
 
-    #pp = Dense(256, activation=act)(Concatenate()([centroids, box_sizes, pp]))
-    pyaw = Concatenate()([pyaw, distance, yaw_corr])
+    pyaw = Concatenate()([pyaw, distance, centroids])
     pyaw = Dense(256, activation=act)(pyaw)
     pyaw = Dense(128, activation=act)(pyaw)
     pyaw = Dense(64,  activation=act)(pyaw)
+    pyaw = Dropout(0.1)(pyaw)
     pyaw = Dense(32,  activation=act)(pyaw)
     yaws = Dense(1,   activation='tanh')(pyaw)
     yaws = Lambda(lambda x: x * np.pi / 2., name='yaw')(yaws)
 
-    #model = Model(inputs=points, outputs=[centroids, corner0s, corner2s])
-    model = Model(inputs=[points, distance, yaw_corr], outputs=[centroids, box_sizes, yaws])
+    model = Model(inputs=[points, distance], outputs=[centroids, box_sizes, yaws])
 
     return model
 
@@ -328,15 +324,9 @@ def gen(items, batch_size, points_per_ring, rings, pointnet_points, sector_split
         # inputs classifier pointnet
         lidars         = np.empty((batch_size, pointnet_points, 4), dtype=np.float32)
         distances      = np.empty((batch_size, 1), dtype=np.float32)
-        yaw_corrs      = np.empty((batch_size, 1), dtype=np.float32)
 
-        # outputs
+        # extra outputs
         box_sizes      = np.empty((batch_size, 3), dtype=np.float32)
-
-        corner0s       = np.empty((batch_size, 3), dtype=np.float32)
-        corner2s       = np.empty((batch_size, 3), dtype=np.float32)
-
-    #box_sizes      = np.empty((batch_size, 3), dtype=np.float32)
         yaws           = np.empty((batch_size, 1), dtype=np.float32)
 
     ring_classification_seqs = np.empty((batch_size * sector_splits, points_per_ring // sector_splits, len(rings)), dtype=np.float32)
@@ -494,11 +484,6 @@ def gen(items, batch_size, points_per_ring, rings, pointnet_points, sector_split
                     lidars[i,:,3] /= 128.
 
                     distances[i] = np.linalg.norm(points_in_box_mean[:2])
-                    yaw_corrs[i] = 0
-
-                    corner0s[i]  = box[2] - points_in_box_mean
-                    corner2s[i]  = box[3] - points_in_box_mean
-
                     box_sizes[i] = tracklet.get_box_size()
 
                     def remove_orientation(yaw):
@@ -566,7 +551,7 @@ def gen(items, batch_size, points_per_ring, rings, pointnet_points, sector_split
                     if pointnet_points is None:
                         yield ([distance_seqs, intensity_seqs], [ring_classification_seqs])
                     else:
-                        yield ([lidars, distances, yaw_corrs], [centroids, box_sizes, yaws])
+                        yield ([lidars, distances], [centroids, box_sizes, yaws])
 
                     i = 0
 
