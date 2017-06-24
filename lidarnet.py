@@ -272,8 +272,8 @@ def save_lidar_plot(lidar_distance, box, filename, highlight=None, lidar_distanc
             if lidar_distance_pred is not None:
                 ring_lidar_distance_pred = lidar_distance_pred[:,iring]
                 colors = np.array(black)
-                colors[ring_lidar_distance_gt >= 0.5, 0] = 1.
-                colors[:, 3] =  ring_lidar_distance_gt
+                colors[ring_lidar_distance_pred >= 0.5, 0] = 1.
+                #colors[:, 3] =  ring_lidar_distance_pred
                 #alpha = np.clip(np.expand_dims(ring_lidar_distance_pred, axis=-1) + 0.2, 0., 1.)
                 #colors = black + (1) alpha # np.concatenate((black, alpha), axis=-1)
                 subplots[0, 1].scatter(angles, lidar_distance[:, iring], s=point_size, color=colors)
