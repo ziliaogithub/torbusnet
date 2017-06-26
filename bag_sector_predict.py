@@ -57,18 +57,18 @@ for topic, msg, t in rosbag.Bag(args.input_bag).read_messages():
 
         # TODO: change the net so that we can feed it the output of filter_lidar_rings directly w/o rearraging the arrays
         lidar_d = np.empty((sectors, points_per_ring // sectors, len(rings)), dtype=np.float32)
-        #lidar_z = np.empty((1, points_per_ring, len(rings)), dtype=np.float32)
+        lidar_z = np.empty((sectors, points_per_ring // sectors, len(rings)), dtype=np.float32)
         lidar_i = np.empty((sectors, points_per_ring // sectors, len(rings)), dtype=np.float32)
         s_start = 0
         for sector in range(sectors):
             s_end = s_start + points_per_ring // sectors
             for ring in range(len(rings)):
                 lidar_d[sector, :, ring] = lidar[ring, s_start:s_end, 0]
-                #lidar_z[0, :, ring] = lidar[ring, :, 1]
+                lidar_z[sector, :, ring] = lidar[ring, s_start:s_end, 1]
                 lidar_i[sector, :, ring] = lidar[ring, s_start:s_end, 2]
             s_start = s_end
         time_prep_end = time.time()
-        class_predictions_by_angle = model.predict([lidar_d, lidar_i], batch_size = sectors)
+        class_predictions_by_angle = model.predict([lidar_d, lidar_z, lidar_i], batch_size = sectors)
         time_infe_end = time.time()
         print 'Total time: %0.3f ms' % ((time_infe_end - time_prep_start) * 1000.0)
         print ' Generator: %0.3f ms' % ((time_prep_generator_end - time_prep_start) * 1000.0)
