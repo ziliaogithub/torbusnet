@@ -38,17 +38,17 @@ R3_VALIDATE_FILE = './validate-release3.txt'
 parser = argparse.ArgumentParser()
 parser.add_argument('-r2', action='store_true', help='Use release 2 car data')
 parser.add_argument('-r3', action='store_true', help='Use release 3 car data')
+parser.add_argument('-ms', '--model-suffix', default=None, type=str, help='Save model with provided suffix e.g. --model-suffix car')
 parser.add_argument('--data-dir', default=R3_DATA_DIR, help='Tracklets top dir')
 parser.add_argument('--train-file', default=R3_TRAIN_FILE, help='Fileindex for training')
 parser.add_argument('--validate-file', default=R3_VALIDATE_FILE, help='Fileindex validation')
-parser.add_argument('--validate-split', default=None, type=int, help='Use % percent of train set instead of fileindex, e.g --validate-split 20%' )
+parser.add_argument('--validate-split', default=None, type=int, help='Use percent of train set instead of fileindex, e.g for 20% --validate-split 20' )
 parser.add_argument('--max_epoch', type=int, default=5000, help='Epoch to run')
 parser.add_argument('--max_dist', type=float, default=25, help='Ignore centroids beyond this distance (meters)')
 parser.add_argument('-b', '--batch_size', type=int, nargs='+', default=[1], help='Batch Size during training, or list of batch sizes for each GPU, e.g. -b 12,8')
 parser.add_argument('-l', '--learning_rate', type=float, default=1e-4, help='Initial learning rate')
 parser.add_argument('-m', '--model', help='load hdf5 model (and continue training)')
 parser.add_argument('-g', '--gpus', type=int, default=1, help='Number of GPUs used for training')
-parser.add_argument('-d', '--dummy', action='store_true', help='Dummy data for toying')
 parser.add_argument('-t', '--test', action='store_true', help='Test model on validation and plot results')
 parser.add_argument('-c', '--cpu', action='store_true', help='force CPU usage')
 parser.add_argument('-p', '--points-per-ring', action='store', type=int, default=1024, help='Number of points per lidar ring')
@@ -77,6 +77,8 @@ DATA_DIR       = args.data_dir
 MAX_DIST       = args.max_dist
 pointnet_points = None
 BOX_SCALING    = (args.scale_h, args.scale_w, args.scale_l)
+CLIP_DIST      = (0., 50.)
+CLIP_HEIGHT    = (-3., 1.)
 
 XML_TRACKLET_FILENAME_UNSAFE = 'tracklet_labels.xml'
 XML_TRACKLET_FILENAME_SAFE   = 'tracklet_labels_trainable.xml'
@@ -87,20 +89,6 @@ if UNSAFE_TRAINING:
 else:
     XML_TRACKLET_FILENAME = XML_TRACKLET_FILENAME_SAFE
 
-
-'''
-11	1539
-12	1890
-13	1951
-14	2072
-15	2092
-16	2171
-17	2165
-18	2163
-19	2110
-
-20	2151
-'''
 assert args.gpus  == len(args.batch_size)
 
 def min_angle_diff(y_true, y_pred):
@@ -111,9 +99,9 @@ def min_angle_diff(y_true, y_pred):
         import tensorflow as tf
         arctan2 = tf.atan2
 
-    # https: // stackoverflow.com / questions / 1878907 / the - smallest - difference - between - 2 - angles
-    vector_diff_square = K.abs(arctan2(K.sin(y_true-y_pred), K.cos(y_true-y_pred)))
-    return K.mean(vector_diff_square, axis=-1)
+    # https://stackoverflow.com/questions/1878907/the-smallest-difference-between-2-angles
+    vector_diff = K.abs(arctan2(K.sin(y_true-y_pred), K.cos(y_true-y_pred)))
+    return K.mean(vector_diff, axis=-1)
 
 def min_angle_error_degrees(y_true, y_pred):
     return min_angle_diff(y_true, y_pred) * 180. / np.pi
@@ -122,12 +110,9 @@ def angle_loss(y_true, y_pred):
     if K._BACKEND == 'theano':
         import theano
         arctan2 = theano.tensor.arctan2
-    elif K._BACKEND == 'tensorflow': # NOT WORDKING!
+    elif K._BACKEND == 'tensorflow': # https://www.tensorflow.org/api_docs/python/tf/atan2
         import tensorflow as tf
         arctan2 = tf.atan2
-
-    # https: // stackoverflow.com / questions / 1878907 / the - smallest - difference - between - 2 - angles
-    # vector_diff_square = K.square(arctan2(K.sin(y_true-y_pred), K.cos(y_true-y_pred)))
 
     vector_diff_square = K.square(K.cos(y_true) - K.cos(y_pred)) + K.square(K.sin(y_true) - K.sin(y_pred))
     return K.mean(vector_diff_square, axis=-1)
@@ -181,8 +166,8 @@ def get_model_recurrent(points_per_ring, rings, hidden_neurons, sector_splits=1)
     lidar_intensities = Input(shape=(points_per_ring, rings ))
 
     l0  = Lambda(lambda x: x * 1/50.  - 0.5, output_shape=(points_per_ring, rings))(lidar_distances)
-    l1  = Lambda(lambda x: x * 1/3.   + 0.5, output_shape=(points_per_ring, rings))(lidar_heights)
-    l2  = Lambda(lambda x: x * 1/128. - 0.5, output_shape=(points_per_ring, rings))(lidar_intensities)
+    l1  = Lambda(lambda x: x * 1/4.   + 0.25, output_shape=(points_per_ring, rings))(lidar_heights)
+    l2  = Lambda(lambda x: x * 1/255. - 0.5, output_shape=(points_per_ring, rings))(lidar_intensities)
 
     o  = Concatenate(axis=-1, name='lidar')([l0, l1, l2])
 #    o  = Concatenate(axis=-1, name='lidar')([l0, l2])
@@ -410,7 +395,8 @@ def gen(items, batch_size, points_per_ring, rings, pointnet_points, sector_split
                         lidar_d_i, lidar_int  = tracklet.get_lidar_rings(frame,
                                                               rings = rings,
                                                               points_per_ring = points_per_ring,
-                                                              clip=(0., 50.),
+                                                              clip = CLIP_DIST,
+                                                              clip_h = CLIP_HEIGHT,
                                                               rotate = random_yaw,
                                                               flipX = flipX, flipY = flipY,
                                                               return_lidar_interpolated = True)
@@ -421,7 +407,8 @@ def gen(items, batch_size, points_per_ring, rings, pointnet_points, sector_split
                 lidar_d_i, lidar_int = tracklet.get_lidar_rings(frame,
                                                      rings = rings,
                                                      points_per_ring = points_per_ring,
-                                                     clip = (0.,50.),
+                                                     clip = CLIP_DIST,
+                                                     clip_h = CLIP_HEIGHT,
                                                      return_lidar_interpolated=True)
 
             if skip is False:
@@ -510,6 +497,10 @@ def gen(items, batch_size, points_per_ring, rings, pointnet_points, sector_split
                     if this_max_angle:
                         save_lidar_plot(distance_seqs[i], box, "train-max_angle.png")
                         this_max_angle = False
+
+                    #print(np.min(intensity_seqs))
+
+                    #print(np.max(intensity_seqs))
 
                 i += 1
                 if i == batch_size:
@@ -653,7 +644,8 @@ if args.test:
         lidar_d_i, lidar_int = tracklet.get_lidar_rings(frame,
                                              rings=rings,
                                              points_per_ring=points_per_ring,
-                                             clip=(0., 50.),
+                                             clip = CLIP_DIST,
+                                             clip_h = CLIP_HEIGHT,
                                              return_lidar_interpolated=True)
         box = tracklet.get_box(frame).T
 
@@ -692,7 +684,7 @@ else:
     print("Validate items: " + str(len(validate_items)))
 
     if args.pointnet:
-        postfix = "-pointnet-rings_"+str(rings[0])+'_'+str(rings[-1]+1)
+        postfix = "-loc-rings_"+str(rings[0])+'_'+str(rings[-1]+1)
         metric  = "-val_loss{val_loss:.4f}"
         monitor = 'val_loss'
     else:
@@ -700,14 +692,14 @@ else:
         metric  = "-val_class_acc{val_acc:.4f}"
         monitor = 'val_acc'
 
+    modelsuffix = "" if args.model_suffix is None else "-" + args.model_suffix
 
     save_checkpoint = ModelCheckpoint(
-        "lidarnet"+postfix+"-epoch{epoch:02d}"+metric+".hdf5",
+        "lidarnet"+modelsuffix+postfix+"-epoch{epoch:02d}"+metric+".hdf5",
         monitor=monitor,
         verbose=0,  save_best_only=True, save_weights_only=False, mode='auto', period=1)
 
     reduce_lr = ReduceLROnPlateau(monitor=monitor, factor=0.5, patience=10, min_lr=1e-7, epsilon = 0.0001, verbose=1)
-    print(len(validate_items) // BATCH_SIZE)
     model.fit_generator(
         generator        = gen(train_items, BATCH_SIZE, points_per_ring, rings, pointnet_points, args.sector_splits),
         steps_per_epoch  = len(train_items) // BATCH_SIZE,
