@@ -176,21 +176,19 @@ def get_model_recurrent(points_per_ring, rings, hidden_neurons, sector_splits=1,
     if NORMALIZE_CAR:
         # These values make sure mean = 0 var = 1.
         # http://yann.lecun.com/exdb/publis/pdf/lecun-98b.pdf
-        l0  = Lambda(lambda x: x * 1/17.88  - 1.35, output_shape=(points_per_ring, rings))(lidar_distances)
-        l1  = Lambda(lambda x: x * 1/1.14   + 0.675, output_shape=(points_per_ring, rings))(lidar_heights)
-        l2  = Lambda(lambda x: x * 1/20.    - 0.97, output_shape=(points_per_ring, rings))(lidar_intensities)
+        l0  = Lambda(lambda x: x * 1/17.88  - 1.35,   output_shape=(points_per_ring, rings), name='car_d_mean0_var1_norm')(lidar_distances)
+        l1  = Lambda(lambda x: x * 1/1.14   + 0.675,  output_shape=(points_per_ring, rings), name='car_h_mean0_var1_norm')(lidar_heights)
+        l2  = Lambda(lambda x: x * 1/20.    - 0.97,   output_shape=(points_per_ring, rings), name='car_i_mean0_var1_norm')(lidar_intensities)
     elif NORMALIZE_PED:
-        # TODO -> COMPUTE VALUES
-        l0  = Lambda(lambda x: x * 1/50.  - 0.5, output_shape=(points_per_ring, rings))(lidar_distances)
-        l1  = Lambda(lambda x: x * 1/4.   + 0.25, output_shape=(points_per_ring, rings))(lidar_heights)
-        l2  = Lambda(lambda x: x * 1/255. - 0.5, output_shape=(points_per_ring, rings))(lidar_intensities)
+        l0  = Lambda(lambda x: x * 1/11.6   - 1.019,  output_shape=(points_per_ring, rings), name='ped_d_mean0_var1_norm')(lidar_distances)
+        l1  = Lambda(lambda x: x * 1/0.8481 + 0.3977, output_shape=(points_per_ring, rings), name='ped_h_mean0_var1_norm')(lidar_heights)
+        l2  = Lambda(lambda x: x * 1/64.35  - 3.3132, output_shape=(points_per_ring, rings), name='ped_i_mean0_var1_norm')(lidar_intensities)
     else:
-        l0  = Lambda(lambda x: x * 1/50.  - 0.5, output_shape=(points_per_ring, rings))(lidar_distances)
-        l1  = Lambda(lambda x: x * 1/4.   + 0.25, output_shape=(points_per_ring, rings))(lidar_heights)
-        l2  = Lambda(lambda x: x * 1/255. - 0.5, output_shape=(points_per_ring, rings))(lidar_intensities)
+        l0  = Lambda(lambda x: x * 1/50.    - 0.5,    output_shape=(points_per_ring, rings), name='avg_d_norm')(lidar_distances)
+        l1  = Lambda(lambda x: x * 1/4.     + 0.25,   output_shape=(points_per_ring, rings), name='avg_h_norm')(lidar_heights)
+        l2  = Lambda(lambda x: x * 1/255.   - 0.5,    output_shape=(points_per_ring, rings), name='avg_i_norm')(lidar_intensities)
 
     o  = Concatenate(axis=-1, name='lidar')([l0, l1, l2])
-#    o  = Concatenate(axis=-1, name='lidar')([l0, l2])
 
     l  = o
 
@@ -230,7 +228,6 @@ def get_model_recurrent(points_per_ring, rings, hidden_neurons, sector_splits=1,
 
 
     model = Model(inputs=[lidar_distances, lidar_heights, lidar_intensities], outputs=outputs)
-    #model = Model(inputs=[lidar_distances, lidar_intensities], outputs=outputs)
     return model
 
 def save_lidar_plot(lidar_distance, box, filename, highlight=None, lidar_distance_gt=None, lidar_distance_pred=None):
@@ -253,18 +250,13 @@ def save_lidar_plot(lidar_distance, box, filename, highlight=None, lidar_distanc
             subplots[0,0].plot(lidar_distance[:, iring])
         else:
             ring_lidar_distance_gt = lidar_distance_gt[iring]
-            #alpha = np.clip(np.expand_dims(ring_lidar_distance_gt, axis=-1) + 0.2, 0., 1.)
             colors = np.array(black)
             colors[:, 0] +=  ring_lidar_distance_gt
-            #colors = np.concatenate((black, alpha), axis=-1)
             subplots[0,0].scatter(angles, lidar_distance[:, iring], s=point_size, color=colors)
             if lidar_distance_pred is not None:
                 ring_lidar_distance_pred = lidar_distance_pred[:,iring]
                 colors = np.array(black)
                 colors[ring_lidar_distance_pred >= 0.5, 0] = 1.
-                #colors[:, 3] =  ring_lidar_distance_pred
-                #alpha = np.clip(np.expand_dims(ring_lidar_distance_pred, axis=-1) + 0.2, 0., 1.)
-                #colors = black + (1) alpha # np.concatenate((black, alpha), axis=-1)
                 subplots[0, 1].scatter(angles, lidar_distance[:, iring], s=point_size, color=colors)
 
     if box is not None:
@@ -367,11 +359,14 @@ def gen(items, batch_size, points_per_ring, rings, pointnet_points, sector_split
         h_current = h_target.copy()
 
     i = 0
+
+
     yielded = 0
     distance_cumsum  = height_cumsum  = intensity_cumsum  = 0.
     distance_cumdev2 = height_cumdev2 = intensity_cumdev2 = 0.
 
     distance_mean = height_mean = intensity_mean = None
+    print_mean = print_var = True
 
     while True:
 
@@ -387,6 +382,8 @@ def gen(items, batch_size, points_per_ring, rings, pointnet_points, sector_split
 
             if training:
 
+                # balance training set by distance by skipping samples if we've already seen enough
+                # from the same distance range.
                 _h = int(BINS * distance / MAX_DIST)
                 if h_current[_h] == 0:
                     skip = True
@@ -397,12 +394,12 @@ def gen(items, batch_size, points_per_ring, rings, pointnet_points, sector_split
                     if np.sum(h_current) == 0:
                         h_current[:] = h_target[:]
 
-                    # random rotation along Z axis
-
+                    # random rotation along Z axis (doesn' make any sense in localizer)
                     random_yaw = (np.random.random_sample() * 2. - 1.) * np.pi if pointnet_points is None else 0.
                     centroid   = point_utils.rotZ(centroid, random_yaw)
                     box        = point_utils.rotZ(box, random_yaw)
 
+                    # TODO: In pointnet we could flip Y
                     flipX      = np.random.randint(2) if pointnet_points is None else 0.
                     flipY      = np.random.randint(2) if pointnet_points is None else 0.
                     if flipX:
@@ -416,7 +413,8 @@ def gen(items, batch_size, points_per_ring, rings, pointnet_points, sector_split
                     angle_span = np.absolute(min_yaw - max_yaw)
                     this_max_angle = False
 
-                    # car is between two frames, ignore it for now
+                    # car is between two frames, ignore it for now.
+                    # TODO: Calculate if car is between two frames
                     if False: #angle_span >= np.pi:
                         skip = True
                     elif angle_span > max_angle_span:
@@ -465,7 +463,6 @@ def gen(items, batch_size, points_per_ring, rings, pointnet_points, sector_split
                     if True:
                         points_in_box_mean = np.mean(points_in_box[:, :3], axis=0)
                         angle = np.arctan2(points_in_box_mean[1], points_in_box_mean[0])
-                        #angle = np.arctan2(centroid[1], centroid[0])
 
                         centroid = point_utils.rotZ(centroid, angle)
                         box = point_utils.rotZ(box, angle)
@@ -473,7 +470,6 @@ def gen(items, batch_size, points_per_ring, rings, pointnet_points, sector_split
                         yaw_correction = -angle
 
                     points_in_box_mean = np.mean(points_in_box[:, :3], axis=0)
-                    #print(points_in_box_mean)
                     points_in_box[:, :3] -= points_in_box_mean
                     centroid -= points_in_box_mean
                     lidars[i] = points_in_box[:,:4]
@@ -482,12 +478,8 @@ def gen(items, batch_size, points_per_ring, rings, pointnet_points, sector_split
                     distances[i] = np.linalg.norm(points_in_box_mean[:2])
                     box_sizes[i] = tracklet.get_box_size()
 
-                    yaw = point_utils.remove_orientation(tracklet.get_yaw(frame))
-                    #if True:
-                    #    yaw = remove_orientation(yaw)
-                    yaws[i] =  point_utils.remove_orientation(yaw + yaw_correction)
-
-#                    yaws[i] =  np.fmod(yaw + yaw_correction, np.pi / 2.)
+                    yaw     = point_utils.remove_orientation(tracklet.get_yaw(frame))
+                    yaws[i] = point_utils.remove_orientation(yaw + yaw_correction)
 
                 centroids[i] = centroid
 
@@ -532,10 +524,6 @@ def gen(items, batch_size, points_per_ring, rings, pointnet_points, sector_split
                         save_lidar_plot(distance_seqs[i], box, "train-max_angle.png")
                         this_max_angle = False
 
-                    #print(np.min(intensity_seqs))
-
-                    #print(np.max(intensity_seqs))
-
                 i += 1
 
                 if i == batch_size:
@@ -557,22 +545,26 @@ def gen(items, batch_size, points_per_ring, rings, pointnet_points, sector_split
                         if yielded >= (len(items) * sector_splits):
                             _yielded = yielded * len(rings) * points_per_ring / sector_splits
                             if distance_mean is not None:
-                                # we can now calculate variance
+                                # we can now calculate variance (2nd pass)
                                 distance_var  = distance_cumdev2 / _yielded
                                 height_var    = height_cumdev2 / _yielded
                                 intensity_var = intensity_cumdev2 / _yielded
-                                print('distance  var:  ' + str(distance_var) )
-                                print('height    var:  ' + str(height_var) )
-                                print('intensity var:  ' + str(intensity_var) )
+                                if print_var:
+                                    print('distance  var:  ' + str(distance_var) )
+                                    print('height    var:  ' + str(height_var) )
+                                    print('intensity var:  ' + str(intensity_var) )
+                                    print_var = False
                                 distance_cumdev2 = height_cumdev2 = intensity_cumdev2 = 0.
 
                             # calculate mean in the first pass
                             distance_mean  = distance_cumsum / _yielded
                             height_mean    = height_cumsum / _yielded
                             intensity_mean = intensity_cumsum / _yielded
-                            print('distance  mean: ' + str(distance_mean) )
-                            print('height    mean: ' + str(height_mean) )
-                            print('intensity mean: ' + str(intensity_mean) )
+                            if print_mean:
+                                print('distance  mean: ' + str(distance_mean) )
+                                print('height    mean: ' + str(height_mean) )
+                                print('intensity mean: ' + str(intensity_mean) )
+                                print_mean = False
                             yielded = 0
                             distance_cumsum = height_cumsum = intensity_cumsum = 0.
 
@@ -633,7 +625,6 @@ if args.model:
         points_per_ring = model.get_input_shape_at(0)[0][1] * args.sector_splits
         nrings = model.get_input_shape_at(0)[0][2]
         print('Loaded segmenter model with ' + str(points_per_ring) + ' points per ring and ' + str(nrings) + ' rings')
-        #assert points_per_ring == args.points_per_ring
         assert nrings == len(rings)
 
 else:
