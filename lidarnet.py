@@ -1,7 +1,7 @@
 import provider_didi
 import argparse
 from keras.models import Model
-from keras.layers import Input, Concatenate, GRU
+from keras.layers import Input, Concatenate, GRU, Bidirectional
 from keras.layers.core import Dense, Flatten, Lambda, Dropout, Reshape
 from keras.layers.convolutional import Conv2D
 from keras.layers.pooling import MaxPooling2D
@@ -61,6 +61,10 @@ parser.add_argument('-ss', '--sector-splits', default=16, type=int, help='Sector
 parser.add_argument('-sw', '--scale-w', default=1., type=float, action='store', help='Scale bounding box width ')
 parser.add_argument('-sl', '--scale-l', default=1., type=float, action='store', help='Scale bounding box width ')
 parser.add_argument('-sh', '--scale-h', default=1., type=float, action='store', help='Scale bounding box width ')
+parser.add_argument('-bd', '--bidirectional-first-pass', action='store_true', help='Make first layer of RNN bidirectional')
+parser.add_argument('-nc', '--normalize-car', action='store_true', help='Normalize car segmenter using pre-computed (hardcoded!) mean/var')
+parser.add_argument('-np', '--normalize-ped', action='store_true', help='Normalize pedestrian segmenter using pre-computed (hardcoded!) mean/var')
+
 
 args = parser.parse_args()
 
@@ -79,6 +83,10 @@ pointnet_points = None
 BOX_SCALING    = (args.scale_h, args.scale_w, args.scale_l)
 CLIP_DIST      = (0., 50.)
 CLIP_HEIGHT    = (-3., 1.)
+
+NORMALIZE_CAR = args.normalize_car
+NORMALIZE_PED = args.normalize_ped
+
 
 XML_TRACKLET_FILENAME_UNSAFE = 'tracklet_labels.xml'
 XML_TRACKLET_FILENAME_SAFE   = 'tracklet_labels_trainable.xml'
@@ -159,15 +167,27 @@ def get_model_pointnet(REGRESSION_POINTS):
 
     return model
 
-def get_model_recurrent(points_per_ring, rings, hidden_neurons, sector_splits=1):
+def get_model_recurrent(points_per_ring, rings, hidden_neurons, sector_splits=1, bidirectional_first_pass=False):
     points_per_ring = points_per_ring // sector_splits
     lidar_distances   = Input(shape=(points_per_ring, rings ))
     lidar_heights     = Input(shape=(points_per_ring, rings ))
     lidar_intensities = Input(shape=(points_per_ring, rings ))
 
-    l0  = Lambda(lambda x: x * 1/50.  - 0.5, output_shape=(points_per_ring, rings))(lidar_distances)
-    l1  = Lambda(lambda x: x * 1/4.   + 0.25, output_shape=(points_per_ring, rings))(lidar_heights)
-    l2  = Lambda(lambda x: x * 1/255. - 0.5, output_shape=(points_per_ring, rings))(lidar_intensities)
+    if NORMALIZE_CAR:
+        # These values make sure mean = 0 var = 1.
+        # http://yann.lecun.com/exdb/publis/pdf/lecun-98b.pdf
+        l0  = Lambda(lambda x: x * 1/17.88  - 1.35, output_shape=(points_per_ring, rings))(lidar_distances)
+        l1  = Lambda(lambda x: x * 1/1.14   + 0.675, output_shape=(points_per_ring, rings))(lidar_heights)
+        l2  = Lambda(lambda x: x * 1/20.    - 0.97, output_shape=(points_per_ring, rings))(lidar_intensities)
+    elif NORMALIZE_PED:
+        # TODO -> COMPUTE VALUES
+        l0  = Lambda(lambda x: x * 1/50.  - 0.5, output_shape=(points_per_ring, rings))(lidar_distances)
+        l1  = Lambda(lambda x: x * 1/4.   + 0.25, output_shape=(points_per_ring, rings))(lidar_heights)
+        l2  = Lambda(lambda x: x * 1/255. - 0.5, output_shape=(points_per_ring, rings))(lidar_intensities)
+    else:
+        l0  = Lambda(lambda x: x * 1/50.  - 0.5, output_shape=(points_per_ring, rings))(lidar_distances)
+        l1  = Lambda(lambda x: x * 1/4.   + 0.25, output_shape=(points_per_ring, rings))(lidar_heights)
+        l2  = Lambda(lambda x: x * 1/255. - 0.5, output_shape=(points_per_ring, rings))(lidar_intensities)
 
     o  = Concatenate(axis=-1, name='lidar')([l0, l1, l2])
 #    o  = Concatenate(axis=-1, name='lidar')([l0, l2])
@@ -188,13 +208,22 @@ def get_model_recurrent(points_per_ring, rings, hidden_neurons, sector_splits=1)
             _name = 'class'
             hidden_neuron = rings
             _dropout = 0.2
-        l = GRU(hidden_neuron,
-                activation = _activation,
-                return_sequences=_return_sequences,
-                name=_name,
-                dropout = _dropout,
-                kernel_initializer = _kernel_initializer,
-                implementation=2)(l)
+        if bidirectional_first_pass and i ==0:
+            l = Bidirectional(GRU(hidden_neuron,
+                    activation = _activation,
+                    return_sequences=_return_sequences,
+                    name=_name,
+                    dropout = _dropout,
+                    kernel_initializer = _kernel_initializer,
+                    implementation=2))(l)
+        else:
+            l = GRU(hidden_neuron,
+                    activation = _activation,
+                    return_sequences=_return_sequences,
+                    name=_name,
+                    dropout = _dropout,
+                    kernel_initializer = _kernel_initializer,
+                    implementation=2)(l)
     classification = l
 
     outputs = [classification]
@@ -338,6 +367,11 @@ def gen(items, batch_size, points_per_ring, rings, pointnet_points, sector_split
         h_current = h_target.copy()
 
     i = 0
+    yielded = 0
+    distance_cumsum  = height_cumsum  = intensity_cumsum  = 0.
+    distance_cumdev2 = height_cumdev2 = intensity_cumdev2 = 0.
+
+    distance_mean = height_mean = intensity_mean = None
 
     while True:
 
@@ -503,10 +537,45 @@ def gen(items, batch_size, points_per_ring, rings, pointnet_points, sector_split
                     #print(np.max(intensity_seqs))
 
                 i += 1
+
                 if i == batch_size:
+                    yielded += batch_size * sector_splits
 
                     if pointnet_points is None:
                         yield ([distance_seqs, height_seqs, intensity_seqs], [ring_classification_seqs])
+
+                        distance_cumsum  += np.sum(distance_seqs.flatten())
+                        height_cumsum    += np.sum(height_seqs.flatten())
+                        intensity_cumsum += np.sum(intensity_seqs.flatten())
+
+                        if distance_mean is not None:
+                            distance_cumdev2  += np.sum((distance_seqs.flatten() - distance_mean) ** 2)
+                            height_cumdev2    += np.sum((height_seqs.flatten() - height_mean) ** 2)
+                            intensity_cumdev2 += np.sum((intensity_seqs.flatten() - intensity_mean) ** 2)
+
+                        yielded += batch_size
+                        if yielded >= (len(items) * sector_splits):
+                            _yielded = yielded * len(rings) * points_per_ring / sector_splits
+                            if distance_mean is not None:
+                                # we can now calculate variance
+                                distance_var  = distance_cumdev2 / _yielded
+                                height_var    = height_cumdev2 / _yielded
+                                intensity_var = intensity_cumdev2 / _yielded
+                                print('distance  var:  ' + str(distance_var) )
+                                print('height    var:  ' + str(height_var) )
+                                print('intensity var:  ' + str(intensity_var) )
+                                distance_cumdev2 = height_cumdev2 = intensity_cumdev2 = 0.
+
+                            # calculate mean in the first pass
+                            distance_mean  = distance_cumsum / _yielded
+                            height_mean    = height_cumsum / _yielded
+                            intensity_mean = intensity_cumsum / _yielded
+                            print('distance  mean: ' + str(distance_mean) )
+                            print('height    mean: ' + str(height_mean) )
+                            print('intensity mean: ' + str(intensity_mean) )
+                            yielded = 0
+                            distance_cumsum = height_cumsum = intensity_cumsum = 0.
+
                     else:
                         yield ([lidars, distances], [centroids, box_sizes, yaws])
 
@@ -577,7 +646,8 @@ else:
             points_per_ring,
             len(rings),
             hidden_neurons=args.hidden_neurons,
-            sector_splits = args.sector_splits)
+            sector_splits = args.sector_splits,
+            bidirectional_first_pass = args.bidirectional_first_pass)
 
 if (args.gpus > 1) or (len(args.batch_size) > 1):
     assert K._backend == 'tensorflow'
