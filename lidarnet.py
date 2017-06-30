@@ -43,8 +43,8 @@ parser.add_argument('--data-dir', default=R3_DATA_DIR, help='Tracklets top dir')
 parser.add_argument('--train-file', default=R3_TRAIN_FILE, help='Fileindex for training')
 parser.add_argument('--validate-file', default=R3_VALIDATE_FILE, help='Fileindex validation')
 parser.add_argument('--validate-split', default=None, type=int, help='Use percent of train set instead of fileindex, e.g for 20% --validate-split 20' )
-parser.add_argument('--max_epoch', type=int, default=5000, help='Epoch to run')
-parser.add_argument('--max_dist', type=float, default=25, help='Ignore centroids beyond this distance (meters)')
+parser.add_argument('--max-epoch', type=int, default=5000, help='Epoch to run')
+parser.add_argument('--max-dist', type=float, default=25, help='Ignore centroids beyond this distance (meters)')
 parser.add_argument('-b', '--batch_size', type=int, nargs='+', default=[1], help='Batch Size during training, or list of batch sizes for each GPU, e.g. -b 12,8')
 parser.add_argument('-l', '--learning_rate', type=float, default=1e-4, help='Initial learning rate')
 parser.add_argument('-m', '--model', help='load hdf5 model (and continue training)')
@@ -52,7 +52,7 @@ parser.add_argument('-g', '--gpus', type=int, default=1, help='Number of GPUs us
 parser.add_argument('-t', '--test', action='store_true', help='Test model on validation and plot results')
 parser.add_argument('-c', '--cpu', action='store_true', help='force CPU usage')
 parser.add_argument('-p', '--points-per-ring', action='store', type=int, default=1024, help='Number of points per lidar ring')
-parser.add_argument('-r', '--rings', nargs='+', type=int, default=[10,24], help='Range of rings to use e.g. -r 10 14 uses rings 10,11,12,13 inclusive')
+parser.add_argument('-r', '--rings', nargs='+', type=int, default=[12,28], help='Range of rings to use e.g. -r 10 14 uses rings 10,11,12,13 inclusive')
 parser.add_argument('-u', '--unsafe-training', action='store_true', help='Use unrefined tracklets for training (UNSAFE!)')
 parser.add_argument('-hn', '--hidden-neurons', nargs='+', type=int, default=[64, 128, 256], help='Hidden neurons for recurrent layers, e.g. -h 64 128 256')
 parser.add_argument('-pn', '--pointnet', action='store_true', help='Train pointnet-based localizer')
@@ -62,9 +62,8 @@ parser.add_argument('-sw', '--scale-w', default=1., type=float, action='store', 
 parser.add_argument('-sl', '--scale-l', default=1., type=float, action='store', help='Scale bounding box width ')
 parser.add_argument('-sh', '--scale-h', default=1., type=float, action='store', help='Scale bounding box width ')
 parser.add_argument('-bd', '--bidirectional-first-pass', action='store_true', help='Make first layer of RNN bidirectional')
-parser.add_argument('-nc', '--normalize-car', action='store_true', help='Normalize car segmenter using pre-computed (hardcoded!) mean/var')
-parser.add_argument('-np', '--normalize-ped', action='store_true', help='Normalize pedestrian segmenter using pre-computed (hardcoded!) mean/var')
-
+parser.add_argument('-nc', '--normalize-car', action='store_true', help='Normalize car model using pre-computed (hardcoded!) mean/var')
+parser.add_argument('-np', '--normalize-ped', action='store_true', help='Normalize pedestrian model using pre-computed (hardcoded!) mean/var')
 
 args = parser.parse_args()
 
@@ -89,7 +88,7 @@ NORMALIZE_PED = args.normalize_ped
 
 
 XML_TRACKLET_FILENAME_UNSAFE = 'tracklet_labels.xml'
-XML_TRACKLET_FILENAME_SAFE   = 'tracklet_labels_trainable.xml'
+XML_TRACKLET_FILENAME_SAFE   = 'tracklet_labels_trainable_fs.xml'
 
 UNSAFE_TRAINING = args.unsafe_training
 if UNSAFE_TRAINING:
@@ -132,36 +131,59 @@ def get_model_pointnet(REGRESSION_POINTS):
     points   = Input(shape=(REGRESSION_POINTS, CHANNELS))
     distance = Input(shape=(1,))
 
+    if NORMALIZE_CAR:
+        # These values make sure mean = 0 var = 1.
+        # http://yann.lecun.com/exdb/publis/pdf/lecun-98b.pdf
+        s_points   = Lambda(lambda x: x * (1/0.7642, 1/0.7183, 1/0.4069, 1/22.27)  - (0.,0.,0.,0.343),
+                          output_shape=(REGRESSION_POINTS, CHANNELS), name='car_points_mean0_var1_norm')(points)
+        s_distance = Lambda(lambda x: x * 1/7.9912 - 1.5931,
+                          output_shape=(1, ), name='car_d_mean0_var1_norm')(distance)
+    elif NORMALIZE_PED: # for --max-dist 45
+        s_points = Lambda(lambda x: x * (1/0.1018, 1/0.1602, 1/0.3988, 1/38.39) - (0., 0., 0., 5.3353),
+                          output_shape=(REGRESSION_POINTS, CHANNELS), name='ped_points_mean0_var1_norm')(points)
+        s_distance = Lambda(lambda x: x * 1/11.0295 - 1.6246,
+                            output_shape=(1,), name='ped_d_mean0_var1_norm')(distance)
+    else:
+        s_points   = Lambda(lambda x: x * (1., 1., 1., 1/255.)  - (0.,0.,0.,0.5),
+                          output_shape=(REGRESSION_POINTS, CHANNELS), name='avg_points_mean0_var1_norm')(points)
+        s_distance = Lambda(lambda x: x * 1/25. - 0.5,
+                          output_shape=(1, ), name='avg_d_mean0_var1_norm')(distance)
+
     act = 'relu'
     ini = 'glorot_uniform'
-    p = Reshape(target_shape=(REGRESSION_POINTS, CHANNELS, 1), input_shape=(REGRESSION_POINTS, CHANNELS))(points)
-    p = Conv2D(filters=64,   kernel_size=(1, CHANNELS), activation=act, kernel_initializer=ini)(p)
-    p = Conv2D(filters=128,  kernel_size=(1, 1), activation=act, kernel_initializer=ini)(p)
-    p = Conv2D(filters=256,  kernel_size=(1, 1), activation=act, kernel_initializer=ini)(p)
-    p = Conv2D(filters=2048, kernel_size=(1, 1), activation=act, kernel_initializer=ini)(p)
+    p = Reshape(target_shape=(REGRESSION_POINTS, CHANNELS, 1), input_shape=(REGRESSION_POINTS, CHANNELS))(s_points)
+    p = Conv2D(filters=64,   kernel_size=(1, CHANNELS), activation=act, kernel_initializer=ini, name = 'p_0')(p)
+    p = Conv2D(filters=128,  kernel_size=(1, 1),        activation=act, kernel_initializer=ini, name = 'p_1')(p)
+    p = Conv2D(filters=256,  kernel_size=(1, 1),        activation=act, kernel_initializer=ini, name = 'p_2')(p)
+    p = Conv2D(filters=2048, kernel_size=(1, 1),        activation=act, kernel_initializer=ini, name = 'p_3')(p)
 
     p = MaxPooling2D(pool_size=(REGRESSION_POINTS, 1), padding='valid')(p)
 
     p = Flatten()(p)
-    p = Dense(512, activation=act)(p)
+    p = Dense(512, activation=act, name='point_features_fc0')(p)
     p = Dropout(0.1)(p)
-    pyaw = psize = p
-    p = Dense(256, activation=act)(p)
-    p = Dropout(0.2)(p)
-    centroids  = Dense(3, name='centroid')(p)
+    pyaw = psize = pcentroid = p
 
-    psize = Dense(64, activation=act)(psize)
+    pcentroid = Dense(256, activation=act, name='centroid_fc0')(pcentroid)
+    pcentroid = Dense(64,  activation=act, name='centroid_fc1')(pcentroid)
+    pcentroid = Dropout(0.2)(pcentroid)
+    centroids = Dense(3, name='centroid')(pcentroid)
+
+    psize = Dense(64, activation=act, name='box_size_fc0')(psize)
     psize = Dropout(0.2)(psize)
     box_sizes = Dense(3, name='box_size')(psize)
 
-    pyaw = Concatenate()([pyaw, distance, centroids])
-    pyaw = Dense(256, activation=act)(pyaw)
-    pyaw = Dense(128, activation=act)(pyaw)
-    pyaw = Dense(64,  activation=act)(pyaw)
-    pyaw = Dropout(0.1)(pyaw)
-    pyaw = Dense(32,  activation=act)(pyaw)
-    yaws = Dense(1,   activation='tanh')(pyaw)
-    yaws = Lambda(lambda x: x * np.pi / 2., name='yaw', output_shape=(1,))(yaws)
+    if NORMALIZE_PED:
+        yaws = Lambda(lambda x: x * 0., name='yaw', output_shape=(1,))(s_distance)
+    else:
+        pyaw = Concatenate()([pyaw, s_distance, centroids])
+        pyaw = Dense(256, activation=act, name='yaw_fc0')(pyaw)
+        pyaw = Dense(128, activation=act, name='yaw_fc1')(pyaw)
+        pyaw = Dense(64,  activation=act, name='yaw_fc2')(pyaw)
+        pyaw = Dropout(0.1)(pyaw)
+        pyaw = Dense(32,  activation=act, name='yaw_fc3')(pyaw)
+        yaws = Dense(1,   activation='tanh')(pyaw)
+        yaws = Lambda(lambda x: x * np.pi / 2., name='yaw', output_shape=(1,))(yaws)
 
     model = Model(inputs=[points, distance], outputs=[centroids, box_sizes, yaws])
 
@@ -360,18 +382,25 @@ def gen(items, batch_size, points_per_ring, rings, pointnet_points, sector_split
 
     i = 0
 
-
     yielded = 0
     distance_cumsum  = height_cumsum  = intensity_cumsum  = 0.
     distance_cumdev2 = height_cumdev2 = intensity_cumdev2 = 0.
+    distance_mean    = height_mean    = intensity_mean    = None
 
-    distance_mean = height_mean = intensity_mean = None
+    lidars_cumsum    = lidars_cumdev2    = np.zeros((4,))
+    dist_cent_cumsum = dist_cent_cumdev2 = np.zeros((1,))
+
     print_mean = print_var = True
 
-    while True:
+    lidars_mean = dist_cent_mean = None
 
+    while True:
         if training:
             random.shuffle(items)
+            #print("train shuffle")
+        else:
+            #print("val")
+            pass
 
         for item in items:
             tracklet, frame = item
@@ -380,12 +409,14 @@ def gen(items, batch_size, points_per_ring, rings, pointnet_points, sector_split
             box          = tracklet.get_box(frame).T
             distance     = np.linalg.norm(centroid[:2]) # only x y
 
+            flipY = 0
+
             if training:
 
                 # balance training set by distance by skipping samples if we've already seen enough
                 # from the same distance range.
                 _h = int(BINS * distance / MAX_DIST)
-                if h_current[_h] == 0:
+                if (h_current[_h] == 0):
                     skip = True
                 else:
                     skip = False
@@ -394,17 +425,17 @@ def gen(items, batch_size, points_per_ring, rings, pointnet_points, sector_split
                     if np.sum(h_current) == 0:
                         h_current[:] = h_target[:]
 
-                    # random rotation along Z axis (doesn' make any sense in localizer)
+                    # random rotation along Z axis (doesn't make any sense in localizer b/c we're aligning with azimuth)
                     random_yaw = (np.random.random_sample() * 2. - 1.) * np.pi if pointnet_points is None else 0.
                     centroid   = point_utils.rotZ(centroid, random_yaw)
                     box        = point_utils.rotZ(box, random_yaw)
 
-                    # TODO: In pointnet we could flip Y
                     flipX      = np.random.randint(2) if pointnet_points is None else 0.
                     flipY      = np.random.randint(2) if pointnet_points is None else 0.
                     if flipX:
                         centroid[0] = -centroid[0]
                         box[:,0]    = -box[:,0]
+
                     if flipY:
                         centroid[1] = -centroid[1]
                         box[:, 1]   = -box[:, 1]
@@ -436,6 +467,7 @@ def gen(items, batch_size, points_per_ring, rings, pointnet_points, sector_split
 
             else:
                 # validation
+                skip = False
                 lidar_d_i, lidar_int = tracklet.get_lidar_rings(frame,
                                                      rings = rings,
                                                      points_per_ring = points_per_ring,
@@ -449,13 +481,40 @@ def gen(items, batch_size, points_per_ring, rings, pointnet_points, sector_split
                 if pointnet_points is not None:
                     points_in_box = DidiTracklet.get_lidar_in_box(lidar_int, box.T)
                     if points_in_box.shape[0] == 0:
-                        print(points_in_box.shape)
-                        print(tracklet.xml_path, frame)
+                        #print(points_in_box.shape)
+                        #print(tracklet.xml_path, frame)
                         if args.unsafe_training:
                             skip = True
                             break
                         else:
-                            assert False
+                            #print(box)
+                            #print(flipY)
+                            #print(lidar_int)
+                            skip = True
+                            break
+                    else:
+                        # attempt to determine if points in box are only ground points
+                        # first, if there's a reflection from a ring closer to all
+                        # reflections of the previous ring, it looks like an object is there
+                        prev_ring_farthest = None
+                        curr_ring_closest  = None
+                        obs_found          = False
+                        for ring in rings:
+                            l = points_in_box[points_in_box[:,4] == ring]
+                            if l.shape[0] > 0:
+                                dists = l[:,0] ** 2 + l[:,1] ** 2
+                                curr_ring_closest = np.amin(dists)
+                                if (prev_ring_farthest is not None) and curr_ring_closest < prev_ring_farthest:
+                                    obs_found = True
+                                    #print(tracklet.xml_path, frame)
+                                    break
+                                prev_ring_farthest = np.amax(dists)
+                        if obs_found is False and np.all(points_in_box[:,3] < 50.):
+                            skip = True
+                            #print(points_in_box[:,3])
+                            #print(tracklet.xml_path, frame)
+
+                    #assert False
 
                     points_in_box = DidiTracklet.resample_lidar(points_in_box, pointnet_points)
 
@@ -473,13 +532,14 @@ def gen(items, batch_size, points_per_ring, rings, pointnet_points, sector_split
                     points_in_box[:, :3] -= points_in_box_mean
                     centroid -= points_in_box_mean
                     lidars[i] = points_in_box[:,:4]
-                    lidars[i,:,3] /= 128.
+                    #lidars[i,:,3] /= 255.
 
                     distances[i] = np.linalg.norm(points_in_box_mean[:2])
                     box_sizes[i] = tracklet.get_box_size()
 
-                    yaw     = point_utils.remove_orientation(tracklet.get_yaw(frame))
-                    yaws[i] = point_utils.remove_orientation(yaw + yaw_correction)
+                    yaw     = point_utils.remove_orientation(tracklet.get_yaw(frame) * 1. if flipY == 0 else -1.)
+
+                    yaws[i] = point_utils.remove_orientation(yaw + yaw_correction) if not NORMALIZE_PED else 0.
 
                 centroids[i] = centroid
 
@@ -527,21 +587,21 @@ def gen(items, batch_size, points_per_ring, rings, pointnet_points, sector_split
                 i += 1
 
                 if i == batch_size:
-                    yielded += batch_size * sector_splits
-
                     if pointnet_points is None:
+
                         yield ([distance_seqs, height_seqs, intensity_seqs], [ring_classification_seqs])
+                        yielded += batch_size * sector_splits
 
                         distance_cumsum  += np.sum(distance_seqs.flatten())
                         height_cumsum    += np.sum(height_seqs.flatten())
                         intensity_cumsum += np.sum(intensity_seqs.flatten())
 
                         if distance_mean is not None:
-                            distance_cumdev2  += np.sum((distance_seqs.flatten() - distance_mean) ** 2)
-                            height_cumdev2    += np.sum((height_seqs.flatten() - height_mean) ** 2)
+                            distance_cumdev2  += np.sum((distance_seqs.flatten()  - distance_mean)  ** 2)
+                            height_cumdev2    += np.sum((height_seqs.flatten()    - height_mean)    ** 2)
                             intensity_cumdev2 += np.sum((intensity_seqs.flatten() - intensity_mean) ** 2)
 
-                        yielded += batch_size
+                        #yielded += batch_size
                         if yielded >= (len(items) * sector_splits):
                             _yielded = yielded * len(rings) * points_per_ring / sector_splits
                             if distance_mean is not None:
@@ -550,9 +610,15 @@ def gen(items, batch_size, points_per_ring, rings, pointnet_points, sector_split
                                 height_var    = height_cumdev2 / _yielded
                                 intensity_var = intensity_cumdev2 / _yielded
                                 if print_var:
+                                    print('')
                                     print('distance  var:  ' + str(distance_var) )
                                     print('height    var:  ' + str(height_var) )
                                     print('intensity var:  ' + str(intensity_var) )
+
+                                    print('scale distance:  1./',np.sqrt(distance_var),  ' offset: -', distance_mean/np.sqrt(distance_var))
+                                    print('scale height:    1./',np.sqrt(height_var),    ' offset: -', height_mean/np.sqrt(height_var))
+                                    print('scale intensity: 1./',np.sqrt(intensity_var), ' offset: -', intensity_mean/np.sqrt(intensity_var))
+
                                     print_var = False
                                 distance_cumdev2 = height_cumdev2 = intensity_cumdev2 = 0.
 
@@ -561,6 +627,7 @@ def gen(items, batch_size, points_per_ring, rings, pointnet_points, sector_split
                             height_mean    = height_cumsum / _yielded
                             intensity_mean = intensity_cumsum / _yielded
                             if print_mean:
+                                print('')
                                 print('distance  mean: ' + str(distance_mean) )
                                 print('height    mean: ' + str(height_mean) )
                                 print('intensity mean: ' + str(intensity_mean) )
@@ -569,7 +636,47 @@ def gen(items, batch_size, points_per_ring, rings, pointnet_points, sector_split
                             distance_cumsum = height_cumsum = intensity_cumsum = 0.
 
                     else:
+
                         yield ([lidars, distances], [centroids, box_sizes, yaws])
+                        yielded += batch_size
+
+                        lidars_cumsum    += np.sum(lidars.reshape(-1,4), axis=0)
+                        dist_cent_cumsum += np.sum(distances, axis=0)
+
+                        if lidars_mean is not None:
+                            lidars_cumdev2    += np.sum((lidars.reshape(-1, 4) - lidars_mean) ** 2, axis=0)
+                            dist_cent_cumdev2 += np.sum((distances - dist_cent_mean)  ** 2)
+
+                        if yielded >= len(items):
+
+                            _yielded = yielded * pointnet_points
+
+                            if lidars_mean is not None:
+                                lidars_var    = lidars_cumdev2 / _yielded
+                                dist_cent_var = dist_cent_cumdev2 / yielded
+
+                                if print_var:
+                                    print('')
+                                    print('lidars var:   ' + str(lidars_var))
+                                    print('distance var: ' + str(dist_cent_var))
+
+                                    print('scale lidars:         1./',np.sqrt(lidars_var),    ' offset: -', lidars_mean/np.sqrt(lidars_var))
+                                    print('scale dist_cent_var:  1./',np.sqrt(dist_cent_var), ' offset: -', dist_cent_mean/np.sqrt(dist_cent_var))
+
+                                    print_var = False
+
+                            lidars_mean    = lidars_cumsum / _yielded
+                            dist_cent_mean = dist_cent_cumsum / yielded
+
+                            if print_mean:
+                                print('')
+                                print('lidars mean:   ' + str(lidars_mean) )
+                                print('distance mean: ' + str(dist_cent_mean) )
+                                print_mean = False
+
+                            lidars_cumsum = lidars_cumdev2 = np.zeros((4,))
+                            dist_cent_cumsum = dist_cent_cumdev2 = np.zeros((1,))
+                            yielded = 0
 
                     i = 0
 
