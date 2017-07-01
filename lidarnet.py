@@ -211,7 +211,6 @@ def get_model_recurrent(points_per_ring, rings, hidden_neurons, sector_splits=1,
         l2  = Lambda(lambda x: x * 1/255.   - 0.5,    output_shape=(points_per_ring, rings), name='avg_i_norm')(lidar_intensities)
 
     o  = Concatenate(axis=-1, name='lidar')([l0, l1, l2])
-
     l  = o
 
     for i, hidden_neuron in enumerate(hidden_neurons):
@@ -491,7 +490,9 @@ def gen(items, batch_size, points_per_ring, rings, pointnet_points, sector_split
                                                               clip_h = CLIP_HEIGHT,
                                                               rotate = random_yaw,
                                                               flipX = flipX, flipY = flipY,
-                                                              return_lidar_interpolated = True)
+                                                              return_lidar_interpolated   = True if pointnet_points is None else False,
+                                                              return_lidar_deinterpolated = False if pointnet_points is None else True
+                                                              )
 
 
             else:
@@ -502,8 +503,9 @@ def gen(items, batch_size, points_per_ring, rings, pointnet_points, sector_split
                                                      points_per_ring = points_per_ring,
                                                      clip = CLIP_DIST,
                                                      clip_h = CLIP_HEIGHT,
-                                                     return_lidar_interpolated=True)
-
+                                                     return_lidar_interpolated=True if pointnet_points is None else False,
+                                                     return_lidar_deinterpolated=False if pointnet_points is None else True,
+                                                     )
             if skip is False:
 
                 # pointnet
@@ -530,7 +532,6 @@ def gen(items, batch_size, points_per_ring, rings, pointnet_points, sector_split
                     points_in_box[:, :3] -= points_in_box_mean
                     centroid -= points_in_box_mean
                     lidars[i] = points_in_box[:,:4]
-                    #lidars[i,:,3] /= 255.
 
                     distances[i] = np.linalg.norm(points_in_box_mean[:2])
                     box_sizes[i] = tracklet.get_box_size()
