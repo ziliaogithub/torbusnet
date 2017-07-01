@@ -198,9 +198,9 @@ def get_model_recurrent(points_per_ring, rings, hidden_neurons, sector_splits=1,
     if NORMALIZE_CAR:
         # These values make sure mean = 0 var = 1.
         # http://yann.lecun.com/exdb/publis/pdf/lecun-98b.pdf
-        l0  = Lambda(lambda x: x * 1/17.88  - 1.35,   output_shape=(points_per_ring, rings), name='car_d_mean0_var1_norm')(lidar_distances)
-        l1  = Lambda(lambda x: x * 1/1.14   + 0.675,  output_shape=(points_per_ring, rings), name='car_h_mean0_var1_norm')(lidar_heights)
-        l2  = Lambda(lambda x: x * 1/20.    - 0.97,   output_shape=(points_per_ring, rings), name='car_i_mean0_var1_norm')(lidar_intensities)
+        l0  = Lambda(lambda x: x * 1/18.1349  - 1.3724, output_shape=(points_per_ring, rings), name='car_d_mean0_var1_norm')(lidar_distances)
+        l1  = Lambda(lambda x: x * 1/1.1619   + 0.6933, output_shape=(points_per_ring, rings), name='car_h_mean0_var1_norm')(lidar_heights)
+        l2  = Lambda(lambda x: x * 1/20.3671  - 0.9837, output_shape=(points_per_ring, rings), name='car_i_mean0_var1_norm')(lidar_intensities)
     elif NORMALIZE_PED:
         l0  = Lambda(lambda x: x * 1/11.6   - 1.019,  output_shape=(points_per_ring, rings), name='ped_d_mean0_var1_norm')(lidar_distances)
         l1  = Lambda(lambda x: x * 1/0.8481 + 0.3977, output_shape=(points_per_ring, rings), name='ped_h_mean0_var1_norm')(lidar_heights)
@@ -297,6 +297,35 @@ def save_lidar_plot(lidar_distance, box, filename, highlight=None, lidar_distanc
     fig.clf()
     plt.close(fig)
     return
+
+def is_obstacle(points_in_box, rings):
+
+    if points_in_box.shape[0] == 0:
+        # print(points_in_box.shape)
+        # print(tracklet.xml_path, frame)
+        return False
+    else:
+        # attempt to determine if points in box are only ground points
+        # first, if there's a reflection from a ring closer to all
+        # reflections of the previous ring, it looks like an object is there
+        prev_ring_farthest = None
+        curr_ring_closest = None
+        obs_found = False
+        for ring in rings:
+            l = points_in_box[points_in_box[:, 4] == ring]
+            if l.shape[0] > 0:
+                dists = l[:, 0] ** 2 + l[:, 1] ** 2
+                curr_ring_closest = np.amin(dists)
+                if (prev_ring_farthest is not None) and curr_ring_closest < prev_ring_farthest:
+                    return True
+                    # print(tracklet.xml_path, frame)
+                prev_ring_farthest = np.amax(dists)
+        if obs_found is False and np.all(points_in_box[:, 3] < 50.):
+            return False
+            # print(points_in_box[:,3])
+            # print(tracklet.xml_path, frame)
+    return True
+
 
 def minmax_yaw(box):
     # initialize with worst case to make sure they get updated
@@ -480,41 +509,10 @@ def gen(items, batch_size, points_per_ring, rings, pointnet_points, sector_split
                 # pointnet
                 if pointnet_points is not None:
                     points_in_box = DidiTracklet.get_lidar_in_box(lidar_int, box.T)
-                    if points_in_box.shape[0] == 0:
-                        #print(points_in_box.shape)
-                        #print(tracklet.xml_path, frame)
-                        if args.unsafe_training:
-                            skip = True
-                            break
-                        else:
-                            #print(box)
-                            #print(flipY)
-                            #print(lidar_int)
-                            skip = True
-                            break
-                    else:
-                        # attempt to determine if points in box are only ground points
-                        # first, if there's a reflection from a ring closer to all
-                        # reflections of the previous ring, it looks like an object is there
-                        prev_ring_farthest = None
-                        curr_ring_closest  = None
-                        obs_found          = False
-                        for ring in rings:
-                            l = points_in_box[points_in_box[:,4] == ring]
-                            if l.shape[0] > 0:
-                                dists = l[:,0] ** 2 + l[:,1] ** 2
-                                curr_ring_closest = np.amin(dists)
-                                if (prev_ring_farthest is not None) and curr_ring_closest < prev_ring_farthest:
-                                    obs_found = True
-                                    #print(tracklet.xml_path, frame)
-                                    break
-                                prev_ring_farthest = np.amax(dists)
-                        if obs_found is False and np.all(points_in_box[:,3] < 50.):
-                            skip = True
-                            #print(points_in_box[:,3])
-                            #print(tracklet.xml_path, frame)
 
-                    #assert False
+                    if not is_obstacle(points_in_box, rings):
+                        skip = True
+                        break
 
                     points_in_box = DidiTracklet.resample_lidar(points_in_box, pointnet_points)
 
@@ -551,6 +549,11 @@ def gen(items, batch_size, points_per_ring, rings, pointnet_points, sector_split
                     _max_yaw = int(points_per_ring * (max_yaw + np.pi) / (2 * np.pi))
 
                     point_idx_in_box = DidiTracklet.get_lidar_in_box(lidar_int, box.T, return_idx_only=True)
+
+                    if not is_obstacle(lidar_int[point_idx_in_box], rings):
+                        #print(tracklet.xml_path, frame)
+                        skip = True
+                        break
 
                     ring_classification = np.zeros((len(rings), points_per_ring ), dtype=np.float32)
                     ring_classification[np.floor_divide(point_idx_in_box, points_per_ring), np.remainder(point_idx_in_box, points_per_ring)] = 1.
