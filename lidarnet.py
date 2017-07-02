@@ -491,9 +491,9 @@ def gen(items, batch_size, points_per_ring, rings, pointnet_points, sector_split
                                                               rotate = random_yaw,
                                                               flipX = flipX, flipY = flipY,
                                                               return_lidar_interpolated   = True if pointnet_points is None else False,
-                                                              return_lidar_deinterpolated = False if pointnet_points is None else True
+                                                              return_lidar_deinterpolated = False if pointnet_points is None else True,
+                                                              lidar_deinterpolate_random = False if pointnet_points is None else True
                                                               )
-
 
             else:
                 # validation
@@ -505,12 +505,13 @@ def gen(items, batch_size, points_per_ring, rings, pointnet_points, sector_split
                                                      clip_h = CLIP_HEIGHT,
                                                      return_lidar_interpolated=True if pointnet_points is None else False,
                                                      return_lidar_deinterpolated=False if pointnet_points is None else True,
+                                                     lidar_deinterpolate_random=False if pointnet_points is None else True
                                                      )
             if skip is False:
 
                 # pointnet
                 if pointnet_points is not None:
-                    points_in_box = DidiTracklet.get_lidar_in_box(lidar_int, box.T)
+                    points_in_box = DidiTracklet.get_lidar_in_box(lidar_int, box.T, jitter_centroid=(0.5,0.5,0.1))
 
                     if not is_obstacle(points_in_box, rings):
                         skip = True
@@ -669,6 +670,9 @@ def gen(items, batch_size, points_per_ring, rings, pointnet_points, sector_split
 
                                     print_var = False
 
+                                lidars_cumdev2    = np.zeros((4,))
+                                dist_cent_cumdev2 = np.zeros((1,))
+
                             lidars_mean    = lidars_cumsum / _yielded
                             dist_cent_mean = dist_cent_cumsum / yielded
 
@@ -678,8 +682,8 @@ def gen(items, batch_size, points_per_ring, rings, pointnet_points, sector_split
                                 print('distance mean: ' + str(dist_cent_mean) )
                                 print_mean = False
 
-                            lidars_cumsum = lidars_cumdev2 = np.zeros((4,))
-                            dist_cent_cumsum = dist_cent_cumdev2 = np.zeros((1,))
+                            lidars_cumsum    = np.zeros((4,))
+                            dist_cent_cumsum = np.zeros((1,))
                             yielded = 0
 
                     i = 0
