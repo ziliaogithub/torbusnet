@@ -511,7 +511,7 @@ def gen(items, batch_size, points_per_ring, rings, pointnet_points, sector_split
 
                 # pointnet
                 if pointnet_points is not None:
-                    points_in_box = DidiTracklet.get_lidar_in_box(lidar_int, box.T, jitter_centroid=(0.5,0.5,0.1))
+                    points_in_box = DidiTracklet.get_lidar_in_box(lidar_int, box.T, jitter_centroid=(0.5,0.5,0.1), scale_xy=0.2, dropout=0.2)
 
                     if not is_obstacle(points_in_box, rings):
                         skip = True
