@@ -64,6 +64,7 @@ parser.add_argument('-sh', '--scale-h', default=1., type=float, action='store', 
 parser.add_argument('-bd', '--bidirectional-first-pass', action='store_true', help='Make first layer of RNN bidirectional')
 parser.add_argument('-nc', '--normalize-car', action='store_true', help='Normalize car model using pre-computed (hardcoded!) mean/var')
 parser.add_argument('-np', '--normalize-ped', action='store_true', help='Normalize pedestrian model using pre-computed (hardcoded!) mean/var')
+parser.add_argument('-gm', '--gpu-memory-frac', default=1., type=float, action='store', help='Use fraction of GPU memory (tensorflow only)')
 
 args = parser.parse_args()
 
@@ -73,6 +74,14 @@ rings = range(args.rings[0], args.rings[1])
 if args.cpu:
     os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
     os.environ["CUDA_VISIBLE_DEVICES"] = ""
+
+if (K._backend == 'tensorflow') and (args.gpu_memory_frac != 1.0):
+    import tensorflow as tf
+    from keras.backend.tensorflow_backend import set_session
+
+    config = tf.ConfigProto()
+    config.gpu_options.per_process_gpu_memory_fraction = args.gpu_memory_frac
+    set_session(tf.Session(config=config))
 
 MAX_EPOCH      = args.max_epoch
 LEARNING_RATE  = args.learning_rate
@@ -85,7 +94,6 @@ CLIP_HEIGHT    = (-3., 1.)
 
 NORMALIZE_CAR = args.normalize_car
 NORMALIZE_PED = args.normalize_ped
-
 
 XML_TRACKLET_FILENAME_UNSAFE = 'tracklet_labels.xml'
 XML_TRACKLET_FILENAME_SAFE   = 'tracklet_labels_trainable_fs.xml'
@@ -422,6 +430,10 @@ def gen(items, batch_size, points_per_ring, rings, pointnet_points, sector_split
 
     lidars_mean = dist_cent_mean = None
 
+    ANGLE_OBS_PER_BIN = 64
+    BINS_ANGLE = 8
+    angle_current = ANGLE_OBS_PER_BIN * np.ones((BINS_ANGLE))
+
     while True:
         if training:
             random.shuffle(items)
@@ -444,14 +456,29 @@ def gen(items, batch_size, points_per_ring, rings, pointnet_points, sector_split
                 # balance training set by distance by skipping samples if we've already seen enough
                 # from the same distance range.
                 _h = int(BINS * distance / MAX_DIST)
-                if (h_current[_h] == 0):
+
+                _angle = point_utils.remove_orientation((
+                    point_utils.remove_orientation(tracklet.get_yaw(frame)) - np.arctan2(centroid[1], centroid[1]))) / np.pi + 0.5
+
+                assert (_angle >= 0 and _angle < 1)
+
+                _h_angle = int(BINS_ANGLE * _angle )
+
+                if (h_current[_h] == 0) and (pointnet_points is None):
+                    skip = True
+                elif (angle_current[_h_angle] == 0) and (pointnet_points is not None):
                     skip = True
                 else:
                     skip = False
 
-                    h_current[_h] -= 1
-                    if np.sum(h_current) == 0:
-                        h_current[:] = h_target[:]
+                    if pointnet_points is None:
+                        h_current[_h] -= 1
+                        if np.sum(h_current) == 0:
+                            h_current[:] = h_target[:]
+                    else:
+                        angle_current[_h_angle] -= 1
+                        if np.sum(angle_current[:]) == 0:
+                            angle_current[:] = ANGLE_OBS_PER_BIN
 
                     # random rotation along Z axis (doesn't make any sense in localizer b/c we're aligning with azimuth)
                     random_yaw = (np.random.random_sample() * 2. - 1.) * np.pi if pointnet_points is None else 0.
@@ -519,15 +546,13 @@ def gen(items, batch_size, points_per_ring, rings, pointnet_points, sector_split
 
                     points_in_box = DidiTracklet.resample_lidar(points_in_box, pointnet_points)
 
-                    yaw_correction = 0.
-                    if True:
-                        points_in_box_mean = np.mean(points_in_box[:, :3], axis=0)
-                        angle = np.arctan2(points_in_box_mean[1], points_in_box_mean[0])
+                    points_in_box_mean = np.mean(points_in_box[:, :3], axis=0)
+                    angle = np.arctan2(points_in_box_mean[1], points_in_box_mean[0])
 
-                        centroid = point_utils.rotZ(centroid, angle)
-                        box = point_utils.rotZ(box, angle)
-                        points_in_box = point_utils.rotZ(points_in_box, angle)
-                        yaw_correction = -angle
+                    centroid = point_utils.rotZ(centroid, angle)
+                    box = point_utils.rotZ(box, angle)
+                    points_in_box = point_utils.rotZ(points_in_box, angle)
+                    yaw_correction = -angle
 
                     points_in_box_mean = np.mean(points_in_box[:, :3], axis=0)
                     points_in_box[:, :3] -= points_in_box_mean
@@ -873,7 +898,7 @@ else:
     save_checkpoint = ModelCheckpoint(
         "lidarnet"+modelsuffix+postfix+"-epoch{epoch:02d}"+metric+".hdf5",
         monitor=monitor,
-        verbose=0,  save_best_only=True, save_weights_only=False, mode='auto', period=1)
+        verbose=0,  save_best_only=False, save_weights_only=False, mode='auto', period=1)
 
     reduce_lr = ReduceLROnPlateau(monitor=monitor, factor=0.5, patience=10, min_lr=1e-7, epsilon = 0.0001, verbose=1)
     model.fit_generator(
